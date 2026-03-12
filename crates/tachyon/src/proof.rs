@@ -22,6 +22,8 @@
 //! The prover supplies an [`ActionPrivate`] per action, containing private
 //! inputs that the circuit checks against the public action and tachygram.
 
+use alloc::vec::Vec;
+
 use crate::{
     action::Action,
     keys::ProofAuthorizingKey,

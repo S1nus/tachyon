@@ -12,6 +12,8 @@
 //! public data (actions and tachygrams) and passes them as the header
 //! to Ragu `verify()`.
 
+use alloc::vec::Vec;
+
 use crate::{
     action::Action,
     keys::ProofAuthorizingKey,

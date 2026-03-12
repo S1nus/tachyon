@@ -4,7 +4,7 @@ use core::marker::PhantomData;
 
 use ff::{Field as _, FromUniformBytes as _, PrimeField as _};
 use pasta_curves::{Fp, Fq};
-use rand::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, RngCore};
 use reddsa::orchard::{Binding, SpendAuth};
 
 use super::{

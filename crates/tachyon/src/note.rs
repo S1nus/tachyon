@@ -35,7 +35,7 @@
 //! Ragu circuits and is TBD.
 use ff::Field as _;
 use pasta_curves::{Fp, Fq};
-use rand::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, RngCore};
 
 use crate::{
     constants::NOTE_VALUE_MAX,

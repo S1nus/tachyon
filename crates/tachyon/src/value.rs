@@ -4,23 +4,25 @@
 //! `cv = [v]V + [rcv]R` where `rcv` is the [`CommitmentTrapdoor`].
 
 use core::{iter, ops, ops::Neg as _};
-use std::sync::LazyLock;
 
 use ff::Field as _;
+use lazy_static::lazy_static;
 use pasta_curves::{
     Ep, EpAffine, Fq, arithmetic::CurveExt as _, group::prime::PrimeCurveAffine as _, pallas,
 };
-use rand::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, RngCore};
 
 use crate::{Note, constants::VALUE_COMMITMENT_DOMAIN};
 
-/// Generator $\mathcal{V}$ for value commitments.
-static VALUE_COMMIT_V: LazyLock<pallas::Point> =
-    LazyLock::new(|| pallas::Point::hash_to_curve(VALUE_COMMITMENT_DOMAIN)(b"v"));
+lazy_static! {
+    /// Generator $\mathcal{V}$ for value commitments.
+    static ref VALUE_COMMIT_V: pallas::Point =
+        pallas::Point::hash_to_curve(VALUE_COMMITMENT_DOMAIN)(b"v");
 
-/// Generator $\mathcal{R}$ for value commitments and binding signatures.
-static VALUE_COMMIT_R: LazyLock<pallas::Point> =
-    LazyLock::new(|| pallas::Point::hash_to_curve(VALUE_COMMITMENT_DOMAIN)(b"r"));
+    /// Generator $\mathcal{R}$ for value commitments and binding signatures.
+    static ref VALUE_COMMIT_R: pallas::Point =
+        pallas::Point::hash_to_curve(VALUE_COMMITMENT_DOMAIN)(b"r");
+}
 
 /// Value commitment trapdoor $\mathsf{rcv}$ — the randomness in a
 /// Pedersen commitment.

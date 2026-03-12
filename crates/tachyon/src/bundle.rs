@@ -7,6 +7,8 @@
 //! - [`Stripped`] — stamp removed, depends on an aggregate
 //! - `Bundle<Option<Stamp>>` — erased stamp state for mixed contexts
 
+use alloc::vec::Vec;
+
 use reddsa::orchard::Binding;
 
 use crate::{

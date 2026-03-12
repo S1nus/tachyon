@@ -31,13 +31,20 @@
 //! All types in the `tachyon` crate, unless otherwise specified, are
 //! Tachyon-specific types.
 
+#![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(clippy::pub_use, reason = "exporting items for consumers")]
+
+#[cfg(feature = "std")]
+extern crate std;
+
+#[macro_use]
+extern crate alloc;
 
 /// `todo!` macro: code after a `todo!()` call executes with stub values.
 macro_rules! todo {
     ($($args:tt)*) => {
-        println!("TODO: {}", $($args)*);
+        // no-op stub for WIP code; prints nothing in no_std
     };
 }
 

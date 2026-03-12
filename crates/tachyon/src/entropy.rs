@@ -6,7 +6,7 @@
 
 use ff::{FromUniformBytes as _, PrimeField as _};
 use pasta_curves::{Fp, Fq};
-use rand::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, RngCore};
 
 use crate::{
     constants::{OUTPUT_ALPHA_PERSONALIZATION, SPEND_ALPHA_PERSONALIZATION},

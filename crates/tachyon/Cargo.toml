@@ -49,7 +49,7 @@ lazy_static = { version = "1", default-features = false, features = [
     "spin_no_std",
 ] }
 pasta_curves = "0.5.1"
-ragu = { git = "https://github.com/s1nus/ragu", rev = "54004571c7c75d7df981d09d01a1f8af52561e1e", default-features = false, features = [
+ragu = { git = "https://github.com/s1nus/ragu", branch = "cnode-working", default-features = false, features = [
     "mock",
     "legacy-deps",
 ] }

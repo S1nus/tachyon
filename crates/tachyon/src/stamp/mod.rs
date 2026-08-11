@@ -13,7 +13,7 @@ use derive_more::{Debug, Display, Eq as TotalEq, Error, Into, PartialEq};
 use ff::PrimeField as _;
 use pasta_curves::Fp;
 use proof::{
-    PROOF_SYSTEM,
+    PROOF_SYSTEM, output,
     stamp::{MergeStamp, OutputStamp, SpendStamp, StampHeader},
 };
 use ragu::{self, proof::PROOF_SIZE_COMPRESSED};
@@ -26,7 +26,7 @@ use crate::{
     effect,
     entropy::ActionRandomizer,
     keys::ProofAuthorizingKey,
-    primitives::{ActionDigest, ActionDigestError, Anchor, Tachygram},
+    primitives::{ActionDigest, ActionDigestError, Anchor, Tachygram, TachygramSetCommit},
     serialization,
     stamp::proof::{delegation, spend, spendable},
     value,
@@ -169,6 +169,7 @@ impl StampState for ProofStamp {
             blake2b::stamp_data_digest(
                 blake2b::stamp_proof_digest(proof.as_ref()),
                 anchor,
+                self.tachygram_set.to_bytes(),
                 &tachygrams,
             )
         };
@@ -191,6 +192,11 @@ impl StampState for ProofStamp {
         reader.read_exact(&mut covered_actions)?;
 
         let anchor = Anchor::read(&mut reader)?;
+
+        // Parsing does not confirm this against the tachygrams below: an MSM
+        // over attacker-supplied bytes is a denial-of-service vector. See
+        // `ProofStamp::is_accumulating`.
+        let tachygram_set = TachygramSetCommit::read(&mut reader)?;
 
         // `n_tachygrams` is attacker-controlled up to MAX_COMPACT_SIZE (2^25), so
         // do not pre-allocate vector capacity. vector reads are ASSUMED to hit
@@ -235,6 +241,7 @@ impl StampState for ProofStamp {
         Ok(Self {
             coverage: covered_actions,
             anchor,
+            tachygram_set,
             tachygrams,
             proof: Box::new(proof),
         })
@@ -245,6 +252,7 @@ impl StampState for ProofStamp {
     fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         writer.write_all(&self.coverage)?;
         self.anchor.write(&mut writer)?;
+        self.tachygram_set.write(&mut writer)?;
         serialization::write_compactsize(
             &mut writer,
             u64::try_from(self.tachygrams.len()).map_err(|_err| {
@@ -415,10 +423,16 @@ impl Plan {
             .ok_or(ProveError::NoActions)??;
 
         let coverage = blake2b::action_descriptor_digest(&Vec::<[u8; 64]>::from_iter(descriptors));
+        let tachygram_set = tachygrams
+            .iter()
+            .copied()
+            .collect::<TachygramSetPoly>()
+            .commit();
 
         Ok(ProofStamp {
             coverage,
             anchor,
+            tachygram_set,
             tachygrams,
             proof,
         })
@@ -463,6 +477,13 @@ pub struct ProofStamp {
     /// Pool state at the anchor block.
     pub anchor: Anchor,
 
+    /// Commitment to the tachygram multiset below, so that anchor advancement
+    /// reads the point rather than rebuilding it.
+    ///
+    /// Carried, not derived, so full validation must confirm it against
+    /// `tachygrams`. See [`ProofStamp::is_accumulating`].
+    pub tachygram_set: TachygramSetCommit,
+
     /// Tachygrams (nullifiers and note commitments) for data availability.
     pub tachygrams: BTreeSet<Tachygram>,
 
@@ -484,8 +505,9 @@ impl ProofStamp {
     /// Proves a single output action, returning the stamp components
     /// `(tachygrams, anchor, proof)`.
     ///
-    /// The output tachygram (note commitment) is derived inside the circuit
-    /// and placed on the stamp for data availability.
+    /// [`output::OutputBind`] settles the tachygram pair, then [`OutputStamp`]
+    /// proves the action over it. Both tachygrams are derived inside the
+    /// circuit and placed on the stamp for data availability.
     pub fn prove_output<RNG: RngCore + CryptoRng>(
         rng: &mut RNG,
         rcv: value::Trapdoor,
@@ -493,9 +515,17 @@ impl ProofStamp {
         note: Note,
         anchor: Anchor,
     ) -> Result<(BTreeSet<Tachygram>, Anchor, Box<ragu::Proof>), ragu::Error> {
-        let (pcd, ()) = PROOF_SYSTEM.seed(rng, OutputStamp, (rcv, alpha, note, anchor))?;
-        let tachygrams = BTreeSet::from_iter([Tachygram::from(note.commitment())]);
+        let (bind_pcd, ()) = PROOF_SYSTEM.seed(rng, output::OutputBind, (note,))?;
+        let tgs = *bind_pcd.data();
+        let tachygrams = BTreeSet::from_iter(<[Tachygram; 2]>::from(tgs));
 
+        let (pcd, ()) = PROOF_SYSTEM.fuse(
+            rng,
+            OutputStamp,
+            (rcv, alpha, note, anchor),
+            bind_pcd,
+            ragu::Proof::trivial().carry::<()>(()),
+        )?;
         let rerand = PROOF_SYSTEM.rerandomize(pcd, rng)?;
 
         Ok((tachygrams, anchor, Box::new(rerand.proof().clone())))
@@ -651,9 +681,16 @@ impl ProofStamp {
                 .collect::<Vec<[u8; 64]>>(),
         );
 
+        let tachygram_set = tachygrams
+            .iter()
+            .copied()
+            .collect::<TachygramSetPoly>()
+            .commit();
+
         Ok(Self {
             coverage,
             anchor,
+            tachygram_set,
             tachygrams,
             proof,
         })
@@ -674,6 +711,25 @@ impl ProofStamp {
         blake2b::action_descriptor_digest(&desc_bytes) == self.coverage
     }
 
+    /// Confirm `tachygram_set` commits to the published tachygrams.
+    ///
+    /// # Soundness
+    ///
+    /// Required for full validation, at mempool admission or when validating
+    /// the containing block. The proof binds the accumulator to the tachygrams
+    /// the circuit witnessed, not to the published list; without this check a
+    /// stamp could publish a list omitting a nullifier the accumulator
+    /// contains, which is what the two-epoch duplicate scan reads.
+    #[must_use]
+    pub(crate) fn is_accumulating(&self) -> bool {
+        self.tachygrams
+            .iter()
+            .copied()
+            .collect::<TachygramSetPoly>()
+            .commit()
+            == self.tachygram_set
+    }
+
     /// Reconstruct the PCD header and verify the proof. Call
     /// [`ProofStamp::is_covering`] first to cheaply predict a mismatch.
     ///
@@ -685,17 +741,15 @@ impl ProofStamp {
         rng: &mut RNG,
         action_digests: impl IntoIterator<Item = ActionDigest>,
     ) -> Result<bool, ragu::Error> {
-        let action_set = action_digests.into_iter().collect::<ActionSetPoly>();
+        if !self.is_accumulating() {
+            return Ok(false);
+        }
 
-        let tachygram_set = self
-            .tachygrams
-            .iter()
-            .copied()
-            .collect::<TachygramSetPoly>();
+        let action_set = action_digests.into_iter().collect::<ActionSetPoly>();
 
         let pcd = self.proof.clone().carry::<StampHeader>((
             action_set.commit(),
-            tachygram_set.commit(),
+            self.tachygram_set,
             self.anchor,
         ));
 

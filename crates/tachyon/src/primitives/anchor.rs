@@ -2,7 +2,7 @@ use corez::io::{self, Read, Write};
 use derive_more::{Debug, Eq as TotalEq, From, Into, PartialEq};
 use ff::Field as _;
 use group::Curve as _;
-use pasta_curves::{Eq, Fp, arithmetic::CurveAffine as _};
+use pasta_curves::{Eq, Fp};
 
 use super::{EpochIndex, TachygramSetCommit};
 use crate::{digest::poseidon, serialization};
@@ -30,16 +30,10 @@ impl Anchor {
     /// Panics if `stamp_commit` is the identity point.
     #[must_use]
     pub fn next_stamp(self, stamp_commit: &TachygramSetCommit) -> Self {
-        let point = Eq::from(*stamp_commit).to_affine();
-        #[expect(
-            clippy::expect_used,
-            reason = "a monic set polynomial cannot commit to the identity"
-        )]
-        let coords = point
-            .coordinates()
-            .into_option()
-            .expect("must not be identity commitment"); // TODO: error?
-        Self(poseidon::anchor_stamp_step(self.0, coords))
+        Self(poseidon::anchor_stamp_step(
+            self.0,
+            Eq::from(*stamp_commit).to_affine(),
+        ))
     }
 
     /// Advance the anchor through one empty block (zero stamps).
@@ -84,8 +78,8 @@ mod tests {
     #[test]
     fn next_stamp_is_deterministic() {
         let rng = &mut StdRng::seed_from_u64(0);
-        let first = TachygramSetPoly::from_iter([Tachygram::from(Fp::random(&mut *rng))]).commit();
-        let second = TachygramSetPoly::from_iter([Tachygram::from(Fp::random(&mut *rng))]).commit();
+        let first = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
+        let second = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
 
         let run_one = Anchor::default().next_stamp(&first).next_stamp(&second);
         let run_two = Anchor::default().next_stamp(&first).next_stamp(&second);
@@ -96,8 +90,8 @@ mod tests {
     #[test]
     fn distinct_stamps_distinct_anchors() {
         let rng = &mut StdRng::seed_from_u64(0);
-        let first = TachygramSetPoly::from_iter([Tachygram::from(Fp::random(&mut *rng))]).commit();
-        let second = TachygramSetPoly::from_iter([Tachygram::from(Fp::random(&mut *rng))]).commit();
+        let first = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
+        let second = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
 
         assert_ne!(
             Anchor::default().next_stamp(&first),
@@ -109,8 +103,8 @@ mod tests {
     #[test]
     fn order_matters() {
         let rng = &mut StdRng::seed_from_u64(0);
-        let first = TachygramSetPoly::from_iter([Tachygram::from(Fp::random(&mut *rng))]).commit();
-        let second = TachygramSetPoly::from_iter([Tachygram::from(Fp::random(&mut *rng))]).commit();
+        let first = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
+        let second = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
 
         let forward = Anchor::default().next_stamp(&first).next_stamp(&second);
         let reverse = Anchor::default().next_stamp(&second).next_stamp(&first);
@@ -136,7 +130,7 @@ mod tests {
     #[test]
     fn next_empty_distinct_from_next_stamp() {
         let rng = &mut StdRng::seed_from_u64(0);
-        let stamp = TachygramSetPoly::from_iter([Tachygram::from(Fp::random(&mut *rng))]).commit();
+        let stamp = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
         let via_empty = Anchor::default().next_empty();
         let via_stamp = Anchor::default().next_stamp(&stamp);
         assert_ne!(via_empty, via_stamp);

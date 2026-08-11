@@ -25,14 +25,11 @@ use crate::{
         build_unspent_seed_pcd, random_block, random_block_with, shared_sk, spend_witness,
         spendable_init_inputs,
     },
-    note::{self, Nullifier},
+    note,
+    nullifier::{self, Nullifier},
     primitives::{Anchor, BlockHeight, EpochIndex, Tachygram, effect},
     value, witness,
 };
-
-fn tg<RNG: RngCore + CryptoRng>(rng: &mut RNG) -> Tachygram {
-    Tachygram::from(Fp::random(rng))
-}
 
 fn mine_cm_block(rng: &mut StdRng, pool: &mut PoolSim, cm: note::Commitment) -> BlockHeight {
     pool.mine(random_block_with(rng, &[alloc::vec![cm]], 4));
@@ -226,9 +223,7 @@ fn stamp_lift_within_epoch() {
     let action_commit = ActionSetPoly::from_iter([plan.digest().expect("valid plan")]).commit();
     let tachygram_commit = TachygramSetPoly::from_iter(stamp.tachygrams).commit();
 
-    pool.advance(usize::try_from(EPOCH_SIZE - 2).expect("fits"), |_| {
-        random_block(rng, 1, 4)
-    });
+    pool.advance(EPOCH_SIZE - 2, |_| random_block(rng, 1, 4));
     let new_height = pool.height();
 
     let stamp_pcd = stamp
@@ -252,9 +247,9 @@ fn spendable_init_rejects_tg_absent() {
 
     let nf_header = user.derived_range(rng, &note, EpochIndex(0), 1);
     let present_nf = user.nf_at(&note, EpochIndex(0));
-    let absent_tg = tg(rng);
+    let absent_tg = Tachygram::random(&mut *rng);
     // cm-inclusion is checked first, so a dummy boundary chain suffices here.
-    let dummy_tg = tg(rng);
+    let dummy_tg = Tachygram::random(&mut *rng);
     let (dummy_chain, ()) = PROOF_SYSTEM
         .seed(
             rng,
@@ -290,7 +285,7 @@ fn unspent_seed_rejects_tg_present() {
     let rng = &mut StdRng::seed_from_u64(0);
     let user = WalletSim::new(shared_sk());
     let note = user.random_note(500);
-    let nf = note.nullifier(&user.pak.nk, EpochIndex(0));
+    let nf = user.nf_at(&note, EpochIndex(0));
 
     let start = Anchor::default();
 
@@ -311,8 +306,8 @@ fn unspent_seed_rejects_tg_present() {
 #[test]
 fn unspent_fuse_rejects_invalid_compositions() {
     let rng = &mut StdRng::seed_from_u64(0);
-    let stamps_left = vec![tg(rng)];
-    let stamps_right = vec![tg(rng)];
+    let stamps_left = vec![Tachygram::random(&mut *rng)];
+    let stamps_right = vec![Tachygram::random(&mut *rng)];
     let start = Anchor::default();
     let mid = start.next_stamp(&TachygramSetPoly::from_iter(stamps_left.clone()).commit());
 
@@ -394,9 +389,7 @@ fn anchor_chain_fuse_rejects_invalid_compositions() {
     {
         let rng = &mut StdRng::seed_from_u64(0);
         let mut pool = PoolSim::genesis(rng);
-        pool.advance(usize::try_from(EPOCH_SIZE + 1).expect("fits"), |_| {
-            random_block(rng, 1, 2)
-        });
+        pool.advance(EPOCH_SIZE + 1, |_| random_block(rng, 1, 2));
 
         let left = build_anchor_chain_pcd(rng, &pool, BlockHeight(0)..=BlockHeight(EPOCH_SIZE - 1));
         let right = build_anchor_chain_pcd(
@@ -654,7 +647,7 @@ fn step_rejects_zero_value_note() {
     let zero_note = Note {
         pk: user.pak.derive_payment_key(),
         value: value::Positive::new_unchecked(0),
-        psi: note::NullifierTrapdoor::random(rng),
+        psi: nullifier::Trapdoor::random(rng),
         rcm: note::CommitmentTrapdoor::random(rng),
     };
 
@@ -933,9 +926,7 @@ fn multi_epoch_fuse_setup(
     Pcd<pool::Unspent>,
 ) {
     let mut pool = PoolSim::genesis(rng);
-    pool.advance(usize::try_from(3 * EPOCH_SIZE + 3).expect("fits"), |_| {
-        random_block(rng, 1, 2)
-    });
+    pool.advance(3 * EPOCH_SIZE + 3, |_| random_block(rng, 1, 2));
     let nf0 = Nullifier::from(Fp::random(&mut *rng));
     let nf1 = Nullifier::from(Fp::random(&mut *rng));
     let nf2 = Nullifier::from(Fp::random(&mut *rng));
@@ -1083,9 +1074,7 @@ fn unspent_fuse_rejects_wrong_combined() {
 fn unspent_fuse_rejects_epoch_boundary_crossing() {
     let rng = &mut StdRng::seed_from_u64(0);
     let mut pool = PoolSim::genesis(rng);
-    pool.advance(usize::try_from(EPOCH_SIZE + 1).expect("fits"), |_| {
-        random_block(rng, 1, 2)
-    });
+    pool.advance(EPOCH_SIZE + 1, |_| random_block(rng, 1, 2));
 
     let nf0 = Nullifier::from(Fp::random(&mut *rng));
     let nf1 = Nullifier::from(Fp::random(&mut *rng));
@@ -1100,7 +1089,7 @@ fn unspent_fuse_rejects_epoch_boundary_crossing() {
     // A forged epoch-1 right half rooted directly at `left.anchor_last` (no
     // `next_epoch` fold). The anchors line up, but the epoch labels reveal a
     // boundary the fuse refuses to cross: that is `UnspentEpochFuse`'s job.
-    let stamp = [tg(rng)];
+    let stamp = [Tachygram::random(&mut *rng)];
     let forged_right = build_unspent_seed_pcd(rng, left_end, EpochIndex(1), &stamp, nf1);
 
     let err = PROOF_SYSTEM
@@ -1129,9 +1118,7 @@ fn unspent_fuse_rejects_epoch_boundary_crossing() {
 /// anchor, the right half from the boundary to inside a block of epoch 4.
 fn epoch_fuse_setup(rng: &mut StdRng) -> ([Nullifier; 5], Pcd<pool::Unspent>, Pcd<pool::Unspent>) {
     let mut pool = PoolSim::genesis(rng);
-    pool.advance(usize::try_from(4 * EPOCH_SIZE + 3).expect("fits"), |_| {
-        random_block(rng, 1, 2)
-    });
+    pool.advance(4 * EPOCH_SIZE + 3, |_| random_block(rng, 1, 2));
     let nf: [Nullifier; 5] = array::from_fn(|_| Nullifier::from(Fp::random(&mut *rng)));
     let start_height = BlockHeight(2);
     let end_height = BlockHeight(4 * EPOCH_SIZE + 2);
@@ -1281,7 +1268,7 @@ fn unspent_epoch_fuse_rejects_wrong_boundary_anchor() {
     // A forged epoch-3 right half rooted directly at `left.anchor_last`: the
     // epoch labels are adjacent, but the root skips the `next_epoch` fold the
     // boundary demands.
-    let stamp = [tg(rng)];
+    let stamp = [Tachygram::random(&mut *rng)];
     let forged_right = build_unspent_seed_pcd(rng, left_end, EpochIndex(3), &stamp, nf3);
     let err = PROOF_SYSTEM
         .fuse(
@@ -1306,9 +1293,7 @@ fn unspent_epoch_fuse_rejects_wrong_boundary_anchor() {
 fn unspent_epoch_fuse_rejects_epoch_skip() {
     let rng = &mut StdRng::seed_from_u64(0);
     let mut pool = PoolSim::genesis(rng);
-    pool.advance(usize::try_from(2 * EPOCH_SIZE).expect("fits"), |_| {
-        random_block(rng, 1, 2)
-    });
+    pool.advance(2 * EPOCH_SIZE, |_| random_block(rng, 1, 2));
     let nf_e0 = Nullifier::from(Fp::random(&mut *rng));
     let nf_e2 = Nullifier::from(Fp::random(&mut *rng));
     let left = build_unspent_pcd_between_blocks(

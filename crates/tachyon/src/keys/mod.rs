@@ -59,10 +59,10 @@
 //! Nullifiers are derived via a GGM tree PRF instantiated from Poseidon:
 //!
 //! $$\mathsf{mk} = \text{KDF}(\psi, \mathsf{nk})$$
-//! $$\mathsf{nf} = F_{\mathsf{mk}}(\text{flavor})$$
+//! $$\mathsf{nf}_e = F_{\mathsf{mk}}(e)$$
 //!
 //! where $\psi$ is the note's nullifier trapdoor, $\mathsf{nk}$ is the
-//! nullifier key, and flavor is the epoch-id.
+//! nullifier key, and $e$ is the epoch index.
 //!
 //! The master root key $\mathsf{mk}$ supports oblivious sync delegation:
 //! prefix keys $\Psi_t$ permit evaluating the PRF only for epochs
@@ -94,6 +94,7 @@ mod tests {
         entropy::ActionEntropy,
         keys::{NullifierKey, PaymentKey, private},
         note::{self, Note},
+        nullifier,
         primitives::effect,
         value,
     };
@@ -109,10 +110,10 @@ mod tests {
 
         let ak_bytes: [u8; 32] = ak.0.into();
         assert_ne!(ak_bytes, nk.0.to_repr());
-        assert_ne!(nk.0.to_repr(), pk.0.to_repr());
+        assert_ne!(nk.0.to_repr(), Fp::from(pk).to_repr());
 
         let pak = sk.derive_proof_private();
-        assert_eq!(pak.derive_payment_key().0, pk.0);
+        assert_eq!(Fp::from(pak.derive_payment_key()), Fp::from(pk));
     }
 
     /// pk must bind to nk: varying nk (with ak fixed) must produce a
@@ -128,7 +129,7 @@ mod tests {
 
         let nk_other = NullifierKey(nk.0 + Fp::ONE);
         let pk_other = PaymentKey::derive(&ak, &nk_other);
-        assert_ne!(pk.0, pk_other.0);
+        assert_ne!(Fp::from(pk), Fp::from(pk_other));
     }
 
     /// rsk.derive_action_public() must equal ak.derive_action_public(alpha) for
@@ -143,7 +144,7 @@ mod tests {
         let note = Note {
             pk: sk.derive_payment_key(),
             value: value::Positive::try_from(1000u64).unwrap(),
-            psi: note::NullifierTrapdoor::random(rng),
+            psi: nullifier::Trapdoor::random(rng),
             rcm: note::CommitmentTrapdoor::random(rng),
         };
         let theta = ActionEntropy::random(rng);

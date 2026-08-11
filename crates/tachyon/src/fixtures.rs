@@ -31,7 +31,8 @@ use crate::{
     digest::blake2b,
     entropy::{ActionEntropy, ActionRandomizer},
     keys::{NoteMasterKey, PaymentKey, ProofAuthorizingKey, private},
-    note::{self, Note, Nullifier, NullifierTrapdoor},
+    note::{self, Note},
+    nullifier::{self, Nullifier},
     primitives::{
         ActionSetPoly, Anchor, BlockHeight, EpochIndex, Tachygram, TachygramSetCommit,
         TachygramSetPoly, effect,
@@ -261,7 +262,7 @@ pub fn random_block(
     n_stamps: usize,
 ) -> Vec<Vec<Tachygram>> {
     iter::repeat_with(|| {
-        iter::repeat_with(|| Tachygram::from(Fp::random(&mut *rng)))
+        iter::repeat_with(|| Tachygram::random(&mut *rng))
             .take(stamp_size)
             .collect()
     })
@@ -283,7 +284,7 @@ pub fn random_block_with(
         .map(|cms| cms.iter().map(|&cm| Tachygram::from(cm)).collect())
         .collect();
     stamps.extend(
-        iter::repeat_with(|| alloc::vec![Tachygram::from(Fp::random(&mut *rng))])
+        iter::repeat_with(|| alloc::vec![Tachygram::random(&mut *rng)])
             .take(n_stamps - stamps_cms.len()),
     );
     stamps
@@ -335,7 +336,7 @@ pub struct PoolSim {
     history: Vec<PoolSimBlock>,
     /// Per-block digest memo, keyed by block height. The history is
     /// append-only, so a cached digest never goes stale.
-    digests: RefCell<BTreeMap<usize, Rc<BlockDigest>>>,
+    digests: RefCell<BTreeMap<BlockHeight, Rc<BlockDigest>>>,
     /// Post-anchor -> (height, stamp position) index, populated alongside the
     /// digests, so anchor lookup is a map hit rather than a full-history scan.
     /// Keyed by the anchor's inner `Fp` (an ordering of `Anchor` itself would
@@ -378,21 +379,27 @@ impl PoolSim {
         }
     }
 
+    /// The block mined at `height`.
+    fn block(&self, height: BlockHeight) -> &PoolSimBlock {
+        self.history
+            .get(usize::try_from(height).expect("fits usize"))
+            .expect("query height should exist")
+    }
+
     /// The block's memoized digest, computed (and its anchors indexed) once.
     fn digest_at(&self, height: BlockHeight) -> Rc<BlockDigest> {
-        let idx = usize::try_from(height).expect("fits usize");
-        if let Some(digest) = self.digests.borrow().get(&idx) {
+        if let Some(digest) = self.digests.borrow().get(&height) {
             self.digest_hits.set(self.digest_hits.get() + 1);
             return Rc::clone(digest);
         }
         self.digest_misses.set(self.digest_misses.get() + 1);
-        let digest = Rc::new(self.history[idx].digest());
+        let digest = Rc::new(self.block(height).digest());
         let mut locs = self.anchor_locs.borrow_mut();
         for (position, anchor) in digest.anchors.iter().enumerate() {
             locs.insert(Fp::from(*anchor), (height, position));
         }
         drop(locs);
-        self.digests.borrow_mut().insert(idx, Rc::clone(&digest));
+        self.digests.borrow_mut().insert(height, Rc::clone(&digest));
         digest
     }
 
@@ -416,11 +423,7 @@ impl PoolSim {
 
     #[must_use]
     pub fn tachygrams_at(&self, height: BlockHeight) -> Vec<Vec<Tachygram>> {
-        self.history
-            .get(usize::try_from(height).expect("fits usize"))
-            .expect("query height should exist")
-            .stamps
-            .clone()
+        self.block(height).stamps.clone()
     }
 
     #[must_use]
@@ -430,10 +433,7 @@ impl PoolSim {
 
     #[must_use]
     pub fn prev_anchor_at(&self, height: BlockHeight) -> Anchor {
-        self.history
-            .get(usize::try_from(height).expect("fits usize"))
-            .expect("query height should exist")
-            .prev
+        self.block(height).prev
     }
 
     #[must_use]
@@ -464,11 +464,7 @@ impl PoolSim {
         // genesis entry) is produced by no stamp: the span then starts at the
         // entered block's stamp 0, with the lift contributing a leading marker.
         let mut steps: Vec<Result<(BlockHeight, Vec<Vec<Tachygram>>), EpochIndex>> = Vec::new();
-        let stamp_len = |height: BlockHeight| -> usize {
-            self.history[usize::try_from(height).expect("fits usize")]
-                .stamps
-                .len()
-        };
+        let stamp_len = |height: BlockHeight| -> usize { self.block(height).stamps.len() };
         let (start_height, from) = match self.locate_anchor(start) {
             Ok((height, position)) => (height, (position + 1).min(stamp_len(height))),
             Err((_pre_boundary, epoch)) => {
@@ -487,7 +483,7 @@ impl PoolSim {
         // start block.
         for height_idx in start_height.0..=end_height.0 {
             let height = BlockHeight(height_idx);
-            let block = &self.history[usize::try_from(height_idx).expect("fits usize")];
+            let block = self.block(height);
             if height_idx != start_height.0 && height.is_epoch_first() {
                 steps.push(Err(height.epoch()));
             }
@@ -555,7 +551,7 @@ impl PoolSim {
 
     pub fn advance(
         &mut self,
-        count: usize,
+        count: u32,
         mut block_factory: impl FnMut(&Self) -> Vec<Vec<Tachygram>>,
     ) {
         for _ in 0..count {
@@ -799,7 +795,7 @@ pub(crate) fn build_unspent_pcd_between_anchors(
         .0
         .epoch();
     let nf_at = |epoch: EpochIndex| -> Nullifier {
-        nf[usize::try_from(epoch.0 - base.0).expect("epoch within span")]
+        nf[usize::try_from(u64::from(epoch - base)).expect("epoch within span")]
     };
     let mut leaves: Vec<Pcd<pool::Unspent>> = Vec::with_capacity(steps.len());
     for (index, (height, block_stamps)) in steps.into_iter().enumerate() {
@@ -853,8 +849,8 @@ fn fuse_unspent_tree(
     let right = fuse_unspent_tree(rng, nf, base, right_chains);
 
     let elapsed_slice = |lo: EpochIndex, hi: EpochIndex| -> &[Nullifier] {
-        let from = usize::try_from(lo.0 - base.0).expect("epoch within span");
-        let to = usize::try_from(hi.0 - base.0).expect("epoch within span");
+        let from = usize::try_from(u64::from(lo - base)).expect("epoch within span");
+        let to = usize::try_from(u64::from(hi - base)).expect("epoch within span");
         &nf[from..to]
     };
     let (_, (left_epoch_start, _), _, (left_epoch_end, _), _) = *left.data();
@@ -895,7 +891,7 @@ fn note_stream_seed(pk: PaymentKey, value: u64) -> [u8; 32] {
         .hash_length(32)
         .personal(b"Tachyon-NoteRnd")
         .to_state()
-        .update(&pk.0.to_repr())
+        .update(&Fp::from(pk).to_repr())
         .update(&value.to_le_bytes())
         .finalize();
     let mut seed = [0u8; 32];
@@ -944,14 +940,14 @@ impl WalletSim {
         Note {
             pk,
             value: value::Positive::try_from(value_amount).expect("fixture value in range"),
-            psi: NullifierTrapdoor::random(notes),
+            psi: nullifier::Trapdoor::random(notes),
             rcm: note::CommitmentTrapdoor::random(notes),
         }
     }
 
     #[must_use]
     pub fn mk(&self, note: &Note) -> NoteMasterKey {
-        self.pak.nk.derive_note_private(&note.psi)
+        self.pak.nk.derive_note_private(note.psi)
     }
 
     #[must_use]
@@ -1264,7 +1260,7 @@ pub mod ggm_tools {
         EpochIndex,
         digest::poseidon,
         keys::{GGM_CHUNK_SIZE, GGM_TREE_DEPTH},
-        note::Nullifier,
+        nullifier::Nullifier,
         stamp::proof::{PROOF_SYSTEM, delegation},
         witness,
     };

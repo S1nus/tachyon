@@ -13,7 +13,7 @@ use crate::{
 /// The randomized action verification key `rk` — per-action, public.
 ///
 /// This is the only key type that **can verify** action signatures.
-/// Goes into [`Action`](crate::Action). Terminal type — no further
+/// Goes into [`Action`]. Terminal type — no further
 /// derivation.
 ///
 /// Both spend and output actions produce an `rk`
@@ -58,7 +58,10 @@ impl TryFrom<EpAffine> for ActionVerificationKey {
 impl From<ActionVerificationKey> for EpAffine {
     fn from(key: ActionVerificationKey) -> Self {
         let bytes: [u8; 32] = key.0.into();
-        Self::from_bytes(&bytes).expect("verification key is a valid curve point")
+        #[expect(clippy::expect_used, reason = "a verification key is a curve point")]
+        Self::from_bytes(&bytes)
+            .into_option()
+            .expect("verification key is a valid curve point")
     }
 }
 

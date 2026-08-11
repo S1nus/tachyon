@@ -4,15 +4,15 @@ default:
 fmt:
     cargo +nightly fmt --all
 
-lint:
-    cargo +nightly clippy --workspace --lib --no-default-features # no_std
-    cargo +nightly clippy --workspace --all-targets --all-features
+lint: doc
+    cargo clippy --workspace --lib --no-default-features # no_std
+    cargo clippy --workspace --all-targets --all-features
 
 test *ARGS:
     cargo test --workspace --all-features {{ARGS}}
 
 doc:
-    cargo doc --workspace --no-deps
+    cargo doc --workspace --no-deps --all-features --document-private-items
 
 check:
     cargo check --workspace --lib --no-default-features # no_std

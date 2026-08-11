@@ -17,6 +17,7 @@ pub mod constants;
 pub mod entropy;
 pub mod keys;
 pub mod note;
+pub mod nullifier;
 pub mod reddsa;
 pub mod stamp;
 pub mod value;
@@ -37,4 +38,5 @@ pub use bundle::{
 };
 pub use note::Note;
 pub use primitives::*;
+pub use serialization::compactsize::{CompactSize, CompactSizeError};
 pub use stamp::{AggregateIdError, Plan as StampPlan, PointerStamp, ProofStamp, Unproven};

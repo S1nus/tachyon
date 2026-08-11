@@ -9,14 +9,15 @@ use alloc::{vec, vec::Vec};
 use ff::Field as _;
 use pasta_curves::{Ep, Eq, Fp, Fq};
 use ragu::{
-    Cycle as _, FixedGenerators as _, Header, Index, Pasta, Polynomial, Step, Suffix,
+    Cycle as _, FixedGenerators as _, Header, Index, Pasta, Step, Suffix,
     constraint::{enforce_equal_point, enforce_zero},
 };
 
 use crate::{
     digest::poseidon,
     keys::{GGM_TREE_ARITY, GGM_TREE_DEPTH, ProofAuthorizingKey},
-    note::{self, Note, Nullifier},
+    note::{self, Note},
+    nullifier::Nullifier,
     primitives::{EpochIndex, NfSeqCommit, NfSeqPoly},
     relations::enforce::enforce_shifted_combination,
 };
@@ -112,10 +113,10 @@ impl Step for NfMasterSeed {
         _right: <Self::Right as Header>::Data,
     ) -> ragu::Result<(<Self::Output as Header>::Data, Self::Aux<'source>)> {
         enforce_zero(
-            note.pk.0 - pak.derive_payment_key().0,
+            Fp::from(note.pk) - Fp::from(pak.derive_payment_key()),
             "NfMasterSeed: pak not related to note",
         )?;
-        let mk = pak.nk.derive_note_private(&note.psi);
+        let mk = pak.nk.derive_note_private(note.psi);
         let cm = note.commitment();
         Ok(((cm, mk.0, 0, EpochIndex(0)), ()))
     }
@@ -259,10 +260,7 @@ impl Step for NullifierFuse {
             "NullifierFuse: right polynomial does not match header",
         )?;
         let merged_nf_seq_commit = merged_seq.commit();
-        let offset =
-            usize::try_from(left_epoch_end.0 - left_epoch_start.0).map_err(|_too_long| {
-                ragu::Error::InvalidWitness("NullifierFuse: range length exceeds usize".into())
-            })?;
+        let offset = left_epoch_end - left_epoch_start;
         // Sentinel concat: a sequence of `k` members is `Σ n_i·X^i + X^k`, so
         // `merged = left ++ right` is the shifted combination
         // `merged(X) = left(X) + X^offset·right(X) - X^offset`. The `-X^offset`
@@ -272,12 +270,9 @@ impl Step for NullifierFuse {
         // and `offset` is left's header-fixed span.
         enforce_shifted_combination(
             ctx,
-            [
-                (&Polynomial::from(left_seq), 0),
-                (&Polynomial::from(right_seq), offset),
-            ],
-            [(-Fp::ONE, offset)],
-            &Polynomial::from(merged_seq),
+            [(left_seq.as_ref(), 0), (right_seq.as_ref(), offset.into())],
+            [(-Fp::ONE, offset.into())],
+            merged_seq.as_ref(),
             "NullifierFuse: merged is not the concat of the halves",
         )?;
         // Pin the boundary nullifiers that sit at a queryable degree-0 position:

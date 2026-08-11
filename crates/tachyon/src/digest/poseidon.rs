@@ -3,6 +3,7 @@
 //! Each named function provides one protocol-defined hash.
 
 use ff::PrimeField as _;
+use group::{GroupEncoding as _, prime::PrimeCurveAffine as _};
 use pasta_curves::{EpAffine, EqAffine, Fp, arithmetic::Coordinates};
 use ragu::Sponge;
 
@@ -37,10 +38,11 @@ const PAYMENT_KEY_DOMAIN: &[u8; 16] = b"Tachyon-PkDerive";
 
 /// Derives a payment key from a spend validating key and nullifier key.
 #[must_use]
-pub(crate) fn payment_key(ak: Fp, nk: Fp) -> Fp {
-    hash::<3>([
+pub(crate) fn payment_key(ak: Coordinates<EpAffine>, nk: Fp) -> Fp {
+    hash::<4>([
         Fp::from_u128(u128::from_le_bytes(*PAYMENT_KEY_DOMAIN)),
-        ak,
+        *ak.x(),
+        *ak.y(),
         nk,
     ])
 }
@@ -52,6 +54,25 @@ const NOTE_COMMITMENT_DOMAIN: &[u8; 16] = b"Tachyon-CmDerive";
 pub(crate) fn note_commitment(rcm: Fp, pk: Fp, value: u64, psi: Fp) -> Fp {
     hash::<5>([
         Fp::from_u128(u128::from_le_bytes(*NOTE_COMMITMENT_DOMAIN)),
+        rcm,
+        pk,
+        Fp::from(value),
+        psi,
+    ])
+}
+
+const PAD_TACHYGRAM_DOMAIN: &[u8; 16] = b"Tachyon-PadDeriv";
+
+/// Derives an output's padding tachygram from the same note fields
+/// [`note_commitment`] commits to.
+///
+/// The preimage is the note opening rather than the commitment: both values are
+/// published in one multiset, so a pad derived from $\mathsf{cm}$ would let an
+/// observer pair them off and recover the output count.
+#[must_use]
+pub(crate) fn pad_tachygram(rcm: Fp, pk: Fp, value: u64, psi: Fp) -> Fp {
+    hash::<5>([
+        Fp::from_u128(u128::from_le_bytes(*PAD_TACHYGRAM_DOMAIN)),
         rcm,
         pk,
         Fp::from(value),
@@ -89,28 +110,47 @@ pub(crate) fn nullifier(leaf: Fp) -> Fp {
     hash::<2>([Fp::from_u128(u128::from_le_bytes(*NULLIFIER_DOMAIN)), leaf])
 }
 
-const ANCHOR_STAMP_DOMAIN: &[u8; 16] = b"Tachyon-StampFld";
-
-/// Advances the anchor by absorbing one stamp's tachygram-set commitment.
-#[must_use]
-pub(crate) fn anchor_stamp_step(anchor_prev: Fp, tgs: Coordinates<EqAffine>) -> Fp {
-    let (x, y) = (tgs.x().to_repr(), tgs.y().to_repr());
-
-    #[expect(clippy::expect_used, reason = "constant size decomposition")]
-    let (x_lo, x_hi, y_lo, y_hi) = (
-        Fp::from_u128(u128::from_le_bytes(x[..16].try_into().expect("16 bytes"))),
-        Fp::from_u128(u128::from_le_bytes(x[16..].try_into().expect("16 bytes"))),
-        Fp::from_u128(u128::from_le_bytes(y[..16].try_into().expect("16 bytes"))),
-        Fp::from_u128(u128::from_le_bytes(y[16..].try_into().expect("16 bytes"))),
+/// A Vesta point's compressed encoding as two 128-bit $\mathbb{F}_p$ limbs.
+///
+/// The 32-byte encoding carries $x$ with the sign of $y$ in its high bit, so
+/// the limb pair determines the point. Each limb reads 16 bytes little-endian,
+/// far below the $\mathbb{F}_p$ modulus.
+///
+/// # Panics
+///
+/// Panics if `point` is the identity.
+#[expect(clippy::expect_used, reason = "constant-size decomposition")]
+fn point_limbs(point: EqAffine) -> (Fp, Fp) {
+    assert!(
+        !bool::from(point.is_identity()),
+        "commitment must not be the identity point"
     );
 
-    hash::<6>([
+    let encoding = point.to_bytes();
+    let (lo, hi) = encoding.split_at(16);
+    (
+        Fp::from_u128(u128::from_le_bytes(lo.try_into().expect("16 bytes"))),
+        Fp::from_u128(u128::from_le_bytes(hi.try_into().expect("16 bytes"))),
+    )
+}
+
+const ANCHOR_STAMP_DOMAIN: &[u8; 16] = b"Tachyon-StampFld";
+
+/// Advances the anchor by absorbing one stamp's epoch and tachygram-set
+/// commitment.
+///
+/// # Panics
+///
+/// Panics if `tgs` is the identity point.
+#[must_use]
+pub(crate) fn anchor_stamp_step(anchor_prev: Fp, epoch: EpochIndex, tgs: EqAffine) -> Fp {
+    let (tgs_lo, tgs_hi) = point_limbs(tgs);
+    hash::<5>([
         Fp::from_u128(u128::from_le_bytes(*ANCHOR_STAMP_DOMAIN)),
         anchor_prev,
-        x_lo,
-        x_hi,
-        y_lo,
-        y_hi,
+        Fp::from(epoch),
+        tgs_lo,
+        tgs_hi,
     ])
 }
 
@@ -118,10 +158,11 @@ const ANCHOR_EMPTY_DOMAIN: &[u8; 16] = b"Tachyon-EmptyBlk";
 
 /// Advances the anchor through one block that contains zero stamps.
 #[must_use]
-pub(crate) fn anchor_empty_step(anchor_prev: Fp) -> Fp {
-    hash::<2>([
+pub(crate) fn anchor_empty_step(anchor_prev: Fp, epoch: EpochIndex) -> Fp {
+    hash::<3>([
         Fp::from_u128(u128::from_le_bytes(*ANCHOR_EMPTY_DOMAIN)),
         anchor_prev,
+        Fp::from(epoch),
     ])
 }
 

@@ -4,7 +4,7 @@
 //! nullifier `GGM(mk, e)`, its pool position, and the minted-note commitment
 //! binding the lineage (and its value) across lifts. [`SpendableInit`]
 //! bootstraps it from a minted note; [`SpendableLift`] advances it over
-//! [`VerifiedUnspent`](super::pool::VerifiedUnspent) segments.
+//! [`VerifiedUnspent`] segments.
 
 extern crate alloc;
 
@@ -19,7 +19,8 @@ use super::{
     pool::{AnchorChain, VerifiedUnspent},
 };
 use crate::{
-    note::{self, Nullifier},
+    note,
+    nullifier::Nullifier,
     primitives::{Anchor, TachygramSetPoly},
 };
 
@@ -51,7 +52,7 @@ impl Header for SpendableHeader {
 /// Bootstrap a spendable from a minted note, pinned to the creation epoch.
 ///
 /// Wallet-only. Fuses a boundary-rooted [`AnchorChain`] with the wallet's
-/// single-leaf [`NullifierHeader`](super::delegation::NullifierHeader): binds
+/// single-leaf [`NullifierHeader`]: binds
 /// `present_nf` to the proven leaf, checks `cm in creation_set`, roots the
 /// chain at the epoch boundary, and requires the cm-stamp to be its final link.
 #[derive(Debug)]
@@ -94,20 +95,23 @@ impl Step for SpendableInit {
 
         // Pin the lineage's starting epoch to consensus. Consensus anchor
         // membership of the eventual spend anchor requires `chain_start` to be
-        // the real epoch boundary. `next_epoch` (`Tachyon-EpochStp`) is the sole
-        // epoch-folding domain and the chain is intra-epoch, so matching
-        // `pre_epoch_anchor.next_epoch(epoch)` against that boundary forces
-        // `epoch == E`, tying the GGM leaf index to the creation epoch.
+        // the real epoch boundary. Every link folds an epoch, but `next_epoch`
+        // (`Tachyon-EpochStp`) is domain-separated from the stamp and empty-block
+        // links, so reaching a boundary anchor by any other link would be a
+        // cross-domain collision; matching `pre_epoch_anchor.next_epoch(epoch)`
+        // against that boundary forces `epoch == E`, tying the derived range's
+        // starting epoch to the creation epoch.
         enforce_zero(
             Fp::from(chain_start) - Fp::from(pre_epoch_anchor.next_epoch(epoch)),
             "SpendableInit: chain not rooted at epoch boundary",
         )?;
 
         // The cm-stamp is the chain's final link: `chain_end ==
-        // pre_cm_anchor.next_stamp(cm_commit)`. This ties the cm-inclusion to a
-        // real, consensus-pinned stamp and yields `post_cm_anchor` as the chain
-        // end; a note created first-in-epoch produces a single-link chain.
-        let post_cm_anchor = pre_cm_anchor.next_stamp(&creation_commit);
+        // pre_cm_anchor.next_stamp(epoch, cm_commit)`. This ties the
+        // cm-inclusion to a real, consensus-pinned stamp in the creation epoch
+        // and yields `post_cm_anchor` as the chain end; a note created
+        // first-in-epoch produces a single-link chain.
+        let post_cm_anchor = pre_cm_anchor.next_stamp(epoch, &creation_commit);
         enforce_zero(
             Fp::from(chain_end) - Fp::from(post_cm_anchor),
             "SpendableInit: cm-stamp is not the chain's final link",

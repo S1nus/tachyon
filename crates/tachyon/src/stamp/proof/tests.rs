@@ -14,25 +14,23 @@ use ragu::{Pcd, Proof};
 use rand::{SeedableRng as _, rngs::StdRng};
 use rand_core::{CryptoRng, RngCore};
 
-use super::{PROOF_SYSTEM, delegation, pool, spend, spendable, stamp};
+use super::{PROOF_SYSTEM, delegation, output, pool, spend, spendable, stamp};
 use crate::{
-    ActionSetPoly, NfSeqPoly, Note, TachygramSetPoly, action,
+    ActionSetPoly, NfSeqPoly, Note, TachygramSetPoly,
     constants::EPOCH_SIZE,
+    digest::poseidon,
     entropy::ActionEntropy,
     fixtures::{
-        PoolSim, SyncSim, WalletSim, build_anchor_chain_pcd, build_output_stamp,
+        PoolSim, SyncSim, WalletSim, build_anchor_chain_pcd, build_output_plan, build_output_stamp,
         build_unspent_pcd_between_anchors, build_unspent_pcd_between_blocks,
         build_unspent_seed_pcd, random_block, random_block_with, shared_sk, spend_witness,
         spendable_init_inputs,
     },
-    note::{self, Nullifier},
+    note,
+    nullifier::{self, Nullifier},
     primitives::{Anchor, BlockHeight, EpochIndex, Tachygram, effect},
     value, witness,
 };
-
-fn tg<RNG: RngCore + CryptoRng>(rng: &mut RNG) -> Tachygram {
-    Tachygram::from(Fp::random(rng))
-}
 
 fn mine_cm_block(rng: &mut StdRng, pool: &mut PoolSim, cm: note::Commitment) -> BlockHeight {
     pool.mine(random_block_with(rng, &[alloc::vec![cm]], 4));
@@ -59,31 +57,31 @@ fn honest_spend_bind(
     user: &WalletSim,
     note: &Note,
     spendable: Pcd<spendable::SpendableHeader>,
+    spend_epoch: EpochIndex,
 ) -> Pcd<spend::SpendHeader> {
-    let (rcv, _theta, alpha) = spend_witness(rng, note);
-    let (spend_pcd, ()) = PROOF_SYSTEM
-        .fuse(
-            rng,
-            spend::SpendBind,
-            (*note, rcv, alpha, user.pak),
-            spendable,
-            Proof::trivial().carry::<()>(()),
-        )
+    let derived = user.derived_range(rng, note, spend_epoch, 2);
+    let nf_next = user.nf_at(note, spend_epoch.next());
+    let (bind_pcd, ()) = PROOF_SYSTEM
+        .fuse(rng, spend::SpendBind, (nf_next,), spendable, derived)
         .expect("SpendBind honest");
-    spend_pcd
+    bind_pcd
 }
 
 fn honest_spend_stamp(
     rng: &mut StdRng,
     user: &WalletSim,
     note: &Note,
-    spend_pcd: Pcd<spend::SpendHeader>,
-    spend_epoch: EpochIndex,
+    bind_pcd: Pcd<spend::SpendHeader>,
 ) -> Pcd<stamp::StampHeader> {
-    let derived = user.derived_range(rng, note, spend_epoch, 2);
-    let nf_next = user.nf_at(note, spend_epoch.next());
+    let (rcv, _theta, alpha) = spend_witness(rng, note);
     let (stamp, ()) = PROOF_SYSTEM
-        .fuse(rng, stamp::SpendStamp, (nf_next,), spend_pcd, derived)
+        .fuse(
+            rng,
+            stamp::SpendStamp,
+            (*note, rcv, alpha, user.pak),
+            bind_pcd,
+            Proof::trivial().carry::<()>(()),
+        )
         .expect("SpendStamp honest");
     stamp
 }
@@ -98,8 +96,8 @@ fn same_epoch_honest_spend_accepted() {
     let epoch = cm_height.epoch();
 
     let spendable = user.spendable_init(rng, &note, &pool, cm_height);
-    let spend_pcd = honest_spend_bind(rng, &user, &note, spendable);
-    let stamp = honest_spend_stamp(rng, &user, &note, spend_pcd, epoch);
+    let spend_pcd = honest_spend_bind(rng, &user, &note, spendable, epoch);
+    let stamp = honest_spend_stamp(rng, &user, &note, spend_pcd);
 
     let expected = TachygramSetPoly::from_iter([
         user.nf_at(&note, epoch).into(),
@@ -177,7 +175,7 @@ fn spendable_init_accepts_forged_chain() {
         .seed(
             rng,
             pool::AnchorSeed,
-            witness::anchor_seed(((), ()), forged_start, &stamps[cm_idx]),
+            witness::anchor_seed(((), ()), forged_start, wrong, &stamps[cm_idx]),
         )
         .expect("AnchorSeed");
 
@@ -202,7 +200,7 @@ fn spendable_init_accepts_forged_chain() {
     // The circuit accepted, but the produced anchor is off the published sequence,
     // so consensus anchor membership is what rejects the eventual spend.
     let forged_anchor = forged_spendable.data().2;
-    assert_eq!(forged_anchor, forged_start.next_stamp(&cm_commit));
+    assert_eq!(forged_anchor, forged_start.next_stamp(wrong, &cm_commit));
     let forged_off_sequence =
         (0..=cm_height.0).all(|height| pool.anchor_at(BlockHeight(height)) != forged_anchor);
     assert!(
@@ -226,9 +224,7 @@ fn stamp_lift_within_epoch() {
     let action_commit = ActionSetPoly::from_iter([plan.digest().expect("valid plan")]).commit();
     let tachygram_commit = TachygramSetPoly::from_iter(stamp.tachygrams).commit();
 
-    pool.advance(usize::try_from(EPOCH_SIZE - 2).expect("fits"), |_| {
-        random_block(rng, 1, 4)
-    });
+    pool.advance(EPOCH_SIZE - 2, |_| random_block(rng, 1, 4));
     let new_height = pool.height();
 
     let stamp_pcd = stamp
@@ -252,14 +248,14 @@ fn spendable_init_rejects_tg_absent() {
 
     let nf_header = user.derived_range(rng, &note, EpochIndex(0), 1);
     let present_nf = user.nf_at(&note, EpochIndex(0));
-    let absent_tg = tg(rng);
+    let absent_tg = Tachygram::random(&mut *rng);
     // cm-inclusion is checked first, so a dummy boundary chain suffices here.
-    let dummy_tg = tg(rng);
+    let dummy_tg = Tachygram::random(&mut *rng);
     let (dummy_chain, ()) = PROOF_SYSTEM
         .seed(
             rng,
             pool::AnchorSeed,
-            witness::anchor_seed(((), ()), Anchor::default(), &[dummy_tg]),
+            witness::anchor_seed(((), ()), Anchor::default(), EpochIndex(0), &[dummy_tg]),
         )
         .expect("AnchorSeed");
 
@@ -290,7 +286,7 @@ fn unspent_seed_rejects_tg_present() {
     let rng = &mut StdRng::seed_from_u64(0);
     let user = WalletSim::new(shared_sk());
     let note = user.random_note(500);
-    let nf = note.nullifier(&user.pak.nk, EpochIndex(0));
+    let nf = user.nf_at(&note, EpochIndex(0));
 
     let start = Anchor::default();
 
@@ -311,10 +307,13 @@ fn unspent_seed_rejects_tg_present() {
 #[test]
 fn unspent_fuse_rejects_invalid_compositions() {
     let rng = &mut StdRng::seed_from_u64(0);
-    let stamps_left = vec![tg(rng)];
-    let stamps_right = vec![tg(rng)];
+    let stamps_left = vec![Tachygram::random(&mut *rng)];
+    let stamps_right = vec![Tachygram::random(&mut *rng)];
     let start = Anchor::default();
-    let mid = start.next_stamp(&TachygramSetPoly::from_iter(stamps_left.clone()).commit());
+    let mid = start.next_stamp(
+        EpochIndex(0),
+        &TachygramSetPoly::from_iter(stamps_left.clone()).commit(),
+    );
 
     // nf mismatch: contiguous states but different nfs.
     {
@@ -373,7 +372,7 @@ fn anchor_chain_fuse_rejects_invalid_compositions() {
             .seed(
                 rng,
                 pool::AnchorSeed,
-                witness::anchor_seed(((), ()), bogus_start, &stamps[0]),
+                witness::anchor_seed(((), ()), bogus_start, BlockHeight(1).epoch(), &stamps[0]),
             )
             .expect("AnchorSeed");
 
@@ -394,9 +393,7 @@ fn anchor_chain_fuse_rejects_invalid_compositions() {
     {
         let rng = &mut StdRng::seed_from_u64(0);
         let mut pool = PoolSim::genesis(rng);
-        pool.advance(usize::try_from(EPOCH_SIZE + 1).expect("fits"), |_| {
-            random_block(rng, 1, 2)
-        });
+        pool.advance(EPOCH_SIZE + 1, |_| random_block(rng, 1, 2));
 
         let left = build_anchor_chain_pcd(rng, &pool, BlockHeight(0)..=BlockHeight(EPOCH_SIZE - 1));
         let right = build_anchor_chain_pcd(
@@ -428,7 +425,10 @@ fn empty_block_anchor_unique_per_height() {
     let h2 = BlockHeight(2);
     assert_ne!(pool.anchor_at(h1), pool.anchor_at(h2));
     // h2's anchor is h1's anchor advanced via next_empty.
-    assert_eq!(pool.anchor_at(h2), pool.anchor_at(h1).next_empty());
+    assert_eq!(
+        pool.anchor_at(h2),
+        pool.anchor_at(h1).next_empty(h2.epoch())
+    );
 }
 
 #[test]
@@ -459,7 +459,10 @@ fn empty_block_unspent_lifts_spendable() {
     let unspent = build_unspent_pcd_between_blocks(rng, &pool, &[nf], empty_height..=empty_height);
     let lifted = user.lift(rng, spendable, unspent, &note, epoch, epoch);
 
-    assert_eq!(lifted.data().2, spendable_anchor_before.next_empty());
+    assert_eq!(
+        lifted.data().2,
+        spendable_anchor_before.next_empty(empty_height.epoch())
+    );
     assert_eq!(lifted.data().2, pool.anchor_at(empty_height));
 }
 
@@ -474,13 +477,13 @@ fn spend_bind_honest() {
     let spend_epoch = height.epoch();
     let spendable_pcd = user.fresh_spend(rng, &pool, height, &note);
 
-    let spend_pcd = honest_spend_bind(rng, &user, &note, spendable_pcd);
-    let (_cm, _desc, present_nf, _anchor) = *spend_pcd.data();
+    let spend_pcd = honest_spend_bind(rng, &user, &note, spendable_pcd, spend_epoch);
+    let (_cm, present_nf, _nf_next, _anchor) = *spend_pcd.data();
     assert_eq!(present_nf, user.nf_at(&note, spend_epoch));
 }
 
 #[test]
-fn spend_bind_rejects_invalid_inputs() {
+fn spend_stamp_rejects_invalid_note() {
     let rng = &mut StdRng::seed_from_u64(0);
     let user = WalletSim::random(rng);
     let other = WalletSim::random(rng);
@@ -506,12 +509,17 @@ fn spend_bind_rejects_invalid_inputs() {
     let wrong_value = value::Positive::try_from(999_999u64).expect("test value in range");
     assert_ne!(u64::from(wrong_value), u64::from(note.value));
 
+    // The nullifier pair binds honestly at SpendBind; the note-level checks
+    // (value, pak, cm) now live at SpendStamp, which proves the action.
+    let spendable_pcd = user.fresh_spend(rng, &pool, height, &note);
+    let bind_pcd = honest_spend_bind(rng, &user, &note, spendable_pcd, spend_epoch);
+
     let cases = [
         (
             "value inflation",
             phantom,
             user.pak,
-            "SpendBind: note does not match the spendable lineage",
+            "SpendStamp: note does not match the spend",
         ),
         (
             "wrong value",
@@ -520,25 +528,24 @@ fn spend_bind_rejects_invalid_inputs() {
                 ..note
             },
             user.pak,
-            "SpendBind: note does not match the spendable lineage",
+            "SpendStamp: note does not match the spend",
         ),
         (
             "unrelated pak",
             note,
             other.pak,
-            "SpendBind: pak not related to note",
+            "SpendStamp: pak not related to note",
         ),
     ];
 
     for (label, spend_note, pak, expected) in cases {
-        let spendable_pcd = user.fresh_spend(rng, &pool, height, &note);
         let (rcv, _theta, alpha) = spend_witness(rng, &note);
         let err = PROOF_SYSTEM
             .fuse(
                 rng,
-                spend::SpendBind,
+                stamp::SpendStamp,
                 (spend_note, rcv, alpha, pak),
-                spendable_pcd,
+                bind_pcd.clone(),
                 Proof::trivial().carry::<()>(()),
             )
             .err()
@@ -551,7 +558,7 @@ fn spend_bind_rejects_invalid_inputs() {
 }
 
 #[test]
-fn spend_stamp_rejects_forged_next() {
+fn spend_bind_rejects_forged_next() {
     let rng = &mut StdRng::seed_from_u64(0);
     let user = WalletSim::new(shared_sk());
     let mut pool = PoolSim::genesis(rng);
@@ -561,12 +568,17 @@ fn spend_stamp_rejects_forged_next() {
     let spend_epoch = height.epoch();
     let spendable_pcd = user.fresh_spend(rng, &pool, height, &note);
 
-    let spend_pcd = honest_spend_bind(rng, &user, &note, spendable_pcd);
     let derived = user.derived_range(rng, &note, spend_epoch, 2);
     let forged_next = Nullifier::from(Fp::random(&mut *rng));
 
     let err = PROOF_SYSTEM
-        .fuse(rng, stamp::SpendStamp, (forged_next,), spend_pcd, derived)
+        .fuse(
+            rng,
+            spend::SpendBind,
+            (forged_next,),
+            spendable_pcd,
+            derived,
+        )
         .err()
         .unwrap();
     let ragu::Error::InvalidWitness(inner) = err else {
@@ -574,12 +586,12 @@ fn spend_stamp_rejects_forged_next() {
     };
     assert_eq!(
         inner.to_string(),
-        "SpendStamp: next nullifier is not the range's end leaf"
+        "SpendBind: next nullifier is not the range's end leaf"
     );
 }
 
 #[test]
-fn spend_stamp_rejects_zero_next_nullifier() {
+fn spend_bind_rejects_zero_next_nullifier() {
     let rng = &mut StdRng::seed_from_u64(0);
     let user = WalletSim::new(shared_sk());
     let mut pool = PoolSim::genesis(rng);
@@ -589,12 +601,11 @@ fn spend_stamp_rejects_zero_next_nullifier() {
     let spend_epoch = height.epoch();
     let spendable_pcd = user.fresh_spend(rng, &pool, height, &note);
 
-    let spend_pcd = honest_spend_bind(rng, &user, &note, spendable_pcd);
     let derived = user.derived_range(rng, &note, spend_epoch, 2);
     let zero_next = Nullifier::from(Fp::ZERO);
 
     let err = PROOF_SYSTEM
-        .fuse(rng, stamp::SpendStamp, (zero_next,), spend_pcd, derived)
+        .fuse(rng, spend::SpendBind, (zero_next,), spendable_pcd, derived)
         .err()
         .unwrap();
     let ragu::Error::InvalidWitness(inner) = err else {
@@ -602,112 +613,64 @@ fn spend_stamp_rejects_zero_next_nullifier() {
     };
     assert_eq!(
         inner.to_string(),
-        "SpendStamp: next nullifier is not the range's end leaf"
+        "SpendBind: next nullifier is not the range's end leaf"
     );
 }
 
+/// Zero-value notes are valid, so both stamping steps accept them: an output
+/// mints one, and a spend consumes one.
 #[test]
-fn spend_stamp_rejects_identity_cv() {
+fn step_accepts_zero_value_note() {
     let rng = &mut StdRng::seed_from_u64(0);
     let user = WalletSim::new(shared_sk());
-    let mut pool = PoolSim::genesis(rng);
-    let note = user.random_note(500);
-    pool.mine(random_block_with(rng, &[vec![note.commitment()]], 4));
-    let height = pool.height();
-    let spend_epoch = height.epoch();
-    let spendable_pcd = user.fresh_spend(rng, &pool, height, &note);
-
-    let real_spend = honest_spend_bind(rng, &user, &note, spendable_pcd);
-    let (cm, real_desc, present_nf, anchor) = *real_spend.data();
-    let identity_cv = value::Commitment::default();
-    let forged_spend = real_spend.proof().clone().carry::<spend::SpendHeader>((
-        cm,
-        action::Descriptor {
-            cv: identity_cv,
-            rk: real_desc.rk,
-        },
-        present_nf,
-        anchor,
-    ));
-
-    let derived = user.derived_range(rng, &note, spend_epoch, 2);
-    let nf_next = user.nf_at(&note, spend_epoch.next());
-    let err = PROOF_SYSTEM
-        .fuse(rng, stamp::SpendStamp, (nf_next,), forged_spend, derived)
-        .err()
-        .unwrap();
-    let ragu::Error::InvalidWitness(inner) = err else {
-        panic!("expected InvalidWitness, got {err:?}");
-    };
-    // The identity cv dies at the header boundary: the header's points are
-    // hashed on the way into the step and the identity is unrepresentable.
-    // `ActionDigest`'s own identity rejection remains as defense in depth
-    // behind this structural check.
-    assert_eq!(inner.to_string(), "point at infinity cannot be witnessed");
-}
-
-#[test]
-fn step_rejects_zero_value_note() {
-    let rng = &mut StdRng::seed_from_u64(0);
-    let user = WalletSim::new(shared_sk());
-
-    let zero_note = Note {
-        pk: user.pak.derive_payment_key(),
-        value: value::Positive::new_unchecked(0),
-        psi: note::NullifierTrapdoor::random(rng),
-        rcm: note::CommitmentTrapdoor::random(rng),
-    };
 
     {
+        let zero_note = Note {
+            pk: user.pak.derive_payment_key(),
+            value: value::Positive::try_from(0u64).expect("zero is in range"),
+            psi: nullifier::Trapdoor::random(rng),
+            rcm: note::CommitmentTrapdoor::random(rng),
+        };
         let out_rcv = value::Trapdoor::random(rng);
         let out_theta = ActionEntropy::random(rng);
         let out_alpha = out_theta.randomizer::<effect::Output>(zero_note.commitment());
         let out_anchor = PoolSim::genesis(rng).anchor();
-        let err = PROOF_SYSTEM
-            .seed(
+
+        let (bind_pcd, ()) = PROOF_SYSTEM
+            .seed(rng, output::OutputBind, (zero_note,))
+            .expect("bind of a zero-value note");
+
+        PROOF_SYSTEM
+            .fuse(
                 rng,
                 stamp::OutputStamp,
                 (out_rcv, out_alpha, zero_note, out_anchor),
+                bind_pcd,
+                Proof::trivial().carry::<()>(()),
             )
-            .err()
-            .unwrap();
-        let ragu::Error::InvalidWitness(inner) = err else {
-            panic!("expected InvalidWitness, got {err:?}");
-        };
-        assert_eq!(inner.to_string(), "OutputStamp: zero-value note");
+            .expect("output of a zero-value note");
     }
 
     {
         let mut pool = PoolSim::genesis(rng);
-        let note = user.random_note(500);
+        let note = user.random_note(0);
         pool.mine(random_block_with(rng, &[vec![note.commitment()]], 4));
         let height = pool.height();
+        let spend_epoch = height.epoch();
         let spendable_pcd = user.fresh_spend(rng, &pool, height, &note);
+        let bind_pcd = honest_spend_bind(rng, &user, &note, spendable_pcd, spend_epoch);
 
         let (rcv, _theta, alpha) = spend_witness(rng, &note);
 
-        let err = PROOF_SYSTEM
+        PROOF_SYSTEM
             .fuse(
                 rng,
-                spend::SpendBind,
-                (
-                    Note {
-                        value: value::Positive::new_unchecked(0),
-                        ..note
-                    },
-                    rcv,
-                    alpha,
-                    user.pak,
-                ),
-                spendable_pcd,
+                stamp::SpendStamp,
+                (note, rcv, alpha, user.pak),
+                bind_pcd,
                 Proof::trivial().carry::<()>(()),
             )
-            .err()
-            .unwrap();
-        let ragu::Error::InvalidWitness(inner) = err else {
-            panic!("expected InvalidWitness, got {err:?}");
-        };
-        assert_eq!(inner.to_string(), "SpendBind: zero-value note");
+            .expect("spend of a zero-value note");
     }
 }
 
@@ -739,8 +702,8 @@ fn spend_after_lift_publishes_anchor_epoch_nullifiers() {
     let unspent = sync.build_next_unspent(rng, 0, &pool, target_height);
     let lifted = user.lift(rng, spendable, unspent, &note, EpochIndex(0), EpochIndex(1));
 
-    let spend_pcd = honest_spend_bind(rng, &user, &note, lifted);
-    let (_cm, _desc, present_nf, _anchor) = *spend_pcd.data();
+    let spend_pcd = honest_spend_bind(rng, &user, &note, lifted, EpochIndex(1));
+    let (_cm, present_nf, _nf_next, _anchor) = *spend_pcd.data();
     assert_eq!(
         present_nf,
         user.nf_at(&note, EpochIndex(1)),
@@ -752,7 +715,7 @@ fn spend_after_lift_publishes_anchor_epoch_nullifiers() {
         "nf_0 was consumed by the lift"
     );
 
-    let stamp = honest_spend_stamp(rng, &user, &note, spend_pcd, EpochIndex(1));
+    let stamp = honest_spend_stamp(rng, &user, &note, spend_pcd);
     let expected = TachygramSetPoly::from_iter([
         user.nf_at(&note, EpochIndex(1)).into(),
         user.nf_at(&note, EpochIndex(2)).into(),
@@ -772,8 +735,8 @@ fn spend_stamp_assembles_tachygrams() {
     let spend_epoch = height.epoch();
     let spendable_pcd = user.fresh_spend(rng, &pool, height, &note);
 
-    let spend_pcd = honest_spend_bind(rng, &user, &note, spendable_pcd);
-    let stamp_pcd = honest_spend_stamp(rng, &user, &note, spend_pcd, spend_epoch);
+    let spend_pcd = honest_spend_bind(rng, &user, &note, spendable_pcd, spend_epoch);
+    let stamp_pcd = honest_spend_stamp(rng, &user, &note, spend_pcd);
     let (_actions, tg_commit, _anchor) = *stamp_pcd.data();
     let expected = TachygramSetPoly::from_iter([
         Tachygram::from(user.nf_at(&note, spend_epoch)),
@@ -933,9 +896,7 @@ fn multi_epoch_fuse_setup(
     Pcd<pool::Unspent>,
 ) {
     let mut pool = PoolSim::genesis(rng);
-    pool.advance(usize::try_from(3 * EPOCH_SIZE + 3).expect("fits"), |_| {
-        random_block(rng, 1, 2)
-    });
+    pool.advance(3 * EPOCH_SIZE + 3, |_| random_block(rng, 1, 2));
     let nf0 = Nullifier::from(Fp::random(&mut *rng));
     let nf1 = Nullifier::from(Fp::random(&mut *rng));
     let nf2 = Nullifier::from(Fp::random(&mut *rng));
@@ -943,15 +904,17 @@ fn multi_epoch_fuse_setup(
     let start_height = BlockHeight(2);
     let junction_height = BlockHeight(2 * EPOCH_SIZE + 2);
     let end_height = BlockHeight(3 * EPOCH_SIZE + 2);
-    let start = pool
-        .prev_anchor_at(start_height)
-        .next_stamp(&pool.stamp_commits_at(start_height)[0]);
-    let junction = pool
-        .prev_anchor_at(junction_height)
-        .next_stamp(&pool.stamp_commits_at(junction_height)[0]);
+    let start = pool.prev_anchor_at(start_height).next_stamp(
+        start_height.epoch(),
+        &pool.stamp_commits_at(start_height)[0],
+    );
+    let junction = pool.prev_anchor_at(junction_height).next_stamp(
+        junction_height.epoch(),
+        &pool.stamp_commits_at(junction_height)[0],
+    );
     let end = pool
         .prev_anchor_at(end_height)
-        .next_stamp(&pool.stamp_commits_at(end_height)[0]);
+        .next_stamp(end_height.epoch(), &pool.stamp_commits_at(end_height)[0]);
     let left = build_unspent_pcd_between_anchors(rng, &pool, &[nf0, nf1, nf2], (start, junction));
     let right = build_unspent_pcd_between_anchors(rng, &pool, &[nf2, nf3], (junction, end));
     assert_eq!(left.data().0, start, "left rooted at the sub-block start");
@@ -1083,9 +1046,7 @@ fn unspent_fuse_rejects_wrong_combined() {
 fn unspent_fuse_rejects_epoch_boundary_crossing() {
     let rng = &mut StdRng::seed_from_u64(0);
     let mut pool = PoolSim::genesis(rng);
-    pool.advance(usize::try_from(EPOCH_SIZE + 1).expect("fits"), |_| {
-        random_block(rng, 1, 2)
-    });
+    pool.advance(EPOCH_SIZE + 1, |_| random_block(rng, 1, 2));
 
     let nf0 = Nullifier::from(Fp::random(&mut *rng));
     let nf1 = Nullifier::from(Fp::random(&mut *rng));
@@ -1100,7 +1061,7 @@ fn unspent_fuse_rejects_epoch_boundary_crossing() {
     // A forged epoch-1 right half rooted directly at `left.anchor_last` (no
     // `next_epoch` fold). The anchors line up, but the epoch labels reveal a
     // boundary the fuse refuses to cross: that is `UnspentEpochFuse`'s job.
-    let stamp = [tg(rng)];
+    let stamp = [Tachygram::random(&mut *rng)];
     let forged_right = build_unspent_seed_pcd(rng, left_end, EpochIndex(1), &stamp, nf1);
 
     let err = PROOF_SYSTEM
@@ -1129,18 +1090,17 @@ fn unspent_fuse_rejects_epoch_boundary_crossing() {
 /// anchor, the right half from the boundary to inside a block of epoch 4.
 fn epoch_fuse_setup(rng: &mut StdRng) -> ([Nullifier; 5], Pcd<pool::Unspent>, Pcd<pool::Unspent>) {
     let mut pool = PoolSim::genesis(rng);
-    pool.advance(usize::try_from(4 * EPOCH_SIZE + 3).expect("fits"), |_| {
-        random_block(rng, 1, 2)
-    });
+    pool.advance(4 * EPOCH_SIZE + 3, |_| random_block(rng, 1, 2));
     let nf: [Nullifier; 5] = array::from_fn(|_| Nullifier::from(Fp::random(&mut *rng)));
     let start_height = BlockHeight(2);
     let end_height = BlockHeight(4 * EPOCH_SIZE + 2);
-    let start = pool
-        .prev_anchor_at(start_height)
-        .next_stamp(&pool.stamp_commits_at(start_height)[0]);
+    let start = pool.prev_anchor_at(start_height).next_stamp(
+        start_height.epoch(),
+        &pool.stamp_commits_at(start_height)[0],
+    );
     let end = pool
         .prev_anchor_at(end_height)
-        .next_stamp(&pool.stamp_commits_at(end_height)[0]);
+        .next_stamp(end_height.epoch(), &pool.stamp_commits_at(end_height)[0]);
     let left = build_unspent_pcd_between_anchors(
         rng,
         &pool,
@@ -1281,7 +1241,7 @@ fn unspent_epoch_fuse_rejects_wrong_boundary_anchor() {
     // A forged epoch-3 right half rooted directly at `left.anchor_last`: the
     // epoch labels are adjacent, but the root skips the `next_epoch` fold the
     // boundary demands.
-    let stamp = [tg(rng)];
+    let stamp = [Tachygram::random(&mut *rng)];
     let forged_right = build_unspent_seed_pcd(rng, left_end, EpochIndex(3), &stamp, nf3);
     let err = PROOF_SYSTEM
         .fuse(
@@ -1306,9 +1266,7 @@ fn unspent_epoch_fuse_rejects_wrong_boundary_anchor() {
 fn unspent_epoch_fuse_rejects_epoch_skip() {
     let rng = &mut StdRng::seed_from_u64(0);
     let mut pool = PoolSim::genesis(rng);
-    pool.advance(usize::try_from(2 * EPOCH_SIZE).expect("fits"), |_| {
-        random_block(rng, 1, 2)
-    });
+    pool.advance(2 * EPOCH_SIZE, |_| random_block(rng, 1, 2));
     let nf_e0 = Nullifier::from(Fp::random(&mut *rng));
     let nf_e2 = Nullifier::from(Fp::random(&mut *rng));
     let left = build_unspent_pcd_between_blocks(
@@ -1780,4 +1738,73 @@ fn nullifier_fuse_rejects_wrong_cm() {
         panic!("expected InvalidWitness, got {err:?}");
     };
     assert_eq!(inner.to_string(), "NullifierFuse: note commitments differ");
+}
+
+/// The pad the step publishes is `pad_tachygram` over the note's own fields.
+fn expected_pad(note: &Note) -> Tachygram {
+    Tachygram::from(poseidon::pad_tachygram(
+        Fp::from(note.rcm),
+        Fp::from(note.pk),
+        u64::from(note.value),
+        Fp::from(note.psi),
+    ))
+}
+
+/// `OutputBind` emits the note's commitment and pad, both derived natively.
+#[test]
+fn output_bind_publishes_the_note_pair() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let note = WalletSim::new(shared_sk()).random_note(200);
+
+    let (pcd, ()) = PROOF_SYSTEM
+        .seed(rng, output::OutputBind, (note,))
+        .expect("OutputBind honest");
+
+    assert_eq!(
+        *pcd.data(),
+        (Tachygram::from(note.commitment()), expected_pad(&note))
+    );
+}
+
+/// Domain separation is what the pad buys: the same note fields hashed under
+/// two domains must not coincide.
+#[test]
+fn pad_differs_from_commitment() {
+    let note = WalletSim::new(shared_sk()).random_note(200);
+
+    assert_ne!(Tachygram::from(note.commitment()), expected_pad(&note));
+}
+
+/// `OutputStamp` binds its note to the pair `OutputBind` settled.
+#[test]
+fn output_stamp_rejects_note_not_matching_the_bind() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let user = WalletSim::new(shared_sk());
+    let bound_note = user.random_note(200);
+    let other_note = user.random_note(300);
+
+    let (bind_pcd, ()) = PROOF_SYSTEM
+        .seed(rng, output::OutputBind, (bound_note,))
+        .expect("OutputBind honest");
+
+    let (rcv, alpha, _plan) = build_output_plan(rng, other_note);
+    let anchor = PoolSim::genesis(rng).anchor();
+
+    let err = PROOF_SYSTEM
+        .fuse(
+            rng,
+            stamp::OutputStamp,
+            (rcv, alpha, other_note, anchor),
+            bind_pcd,
+            Proof::trivial().carry::<()>(()),
+        )
+        .err()
+        .unwrap();
+    let ragu::Error::InvalidWitness(inner) = err else {
+        panic!("expected InvalidWitness, got {err:?}");
+    };
+    assert_eq!(
+        inner.to_string(),
+        "OutputStamp: note does not match the bound output"
+    );
 }

@@ -3,23 +3,33 @@ use core::cmp::Ordering;
 use derive_more::{Debug, Eq as TotalEq, From, Into, PartialEq};
 use ff::PrimeField as _;
 use pasta_curves::Fp;
+#[cfg(test)]
+use rand_core::{CryptoRng, RngCore};
 
-/// A tachygram is a field element ($\mathbb{F}_p$) representing either a
-/// note commitment or a nullifier in the Tachyon polynomial accumulator.
+/// A field element ($\mathbb{F}_p$) in the Tachyon polynomial accumulator.
 ///
-/// The accumulator does not distinguish between commitments and nullifiers.
-/// This unified approach simplifies the proof system and enables efficient
-/// batch operations.
+/// [`Nullifier`](crate::nullifier::Nullifier) and
+/// [`Commitment`](crate::note::Commitment) both wrap a tachygram, and the
+/// accumulator does not distinguish them.
 ///
-/// The number of tachygrams in a stamp need not equal the number of
-/// actions. The invariant is consistency between the listed tachygrams
-/// and the proof's `tachygram_acc`, not a fixed ratio to actions.
+/// Every action publishes exactly two: a spend its epoch nullifier pair, an
+/// output its commitment and padding tachygram. The uniform arity is what
+/// keeps a stamp's tachygram count from revealing its spend/output split.
 ///
 /// Consensus rejects a published tachygram that has already appeared in
 /// any block of the current or immediately preceding epoch. See the
 /// Tachygrams book chapter for why the window spans two epochs.
 #[derive(Clone, Copy, Debug, From, Into, PartialEq, TotalEq)]
 pub struct Tachygram(Fp);
+
+impl Tachygram {
+    #[cfg(test)]
+    pub(crate) fn random<RNG: RngCore + CryptoRng>(rng: &mut RNG) -> Self {
+        use ff::Field as _;
+
+        Self(Fp::random(rng))
+    }
+}
 
 impl PartialOrd for Tachygram {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {

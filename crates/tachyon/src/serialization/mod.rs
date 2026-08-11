@@ -4,11 +4,9 @@
 //! throughout Tachyon: Pallas base field (`Fp`), Pallas scalar field
 //! (`Fq`), and Pallas affine curve points (`EpAffine`).
 
-#![allow(dead_code, reason = "may not be used")]
-
 use corez::io::{self, Read, Write};
 use ff::PrimeField as _;
-use pasta_curves::{EpAffine, EqAffine, Fp, Fq, group::GroupEncoding as _};
+use pasta_curves::{EpAffine, EqAffine, Fp, group::GroupEncoding as _};
 
 pub(crate) mod compactsize;
 
@@ -47,19 +45,6 @@ pub(crate) fn read_fp<R: Read>(mut reader: R) -> io::Result<Fp> {
 /// Write a Pallas base field element (`Fp`) as 32 bytes.
 pub(crate) fn write_fp<W: Write>(mut writer: W, fp: &Fp) -> io::Result<()> {
     writer.write_all(&fp.to_repr())
-}
-
-/// Read a Pallas scalar field element (`Fq`) from 32 bytes.
-pub(crate) fn read_fq<R: Read>(mut reader: R) -> io::Result<Fq> {
-    let mut bytes = [0u8; 32];
-    reader.read_exact(&mut bytes)?;
-    Option::from(Fq::from_repr(bytes))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid Fq encoding"))
-}
-
-/// Write a Pallas scalar field element (`Fq`) as 32 bytes.
-pub(crate) fn write_fq<W: Write>(mut writer: W, fq: &Fq) -> io::Result<()> {
-    writer.write_all(&fq.to_repr())
 }
 
 /// Read a Pallas affine curve point (`EpAffine`) from 32 compressed bytes.

@@ -1,4 +1,4 @@
-#![allow(clippy::panic, reason = "test code")]
+#![allow(clippy::panic, clippy::too_many_lines, reason = "test code")]
 
 use alloc::{boxed::Box, string::ToString as _, vec, vec::Vec};
 
@@ -31,18 +31,13 @@ fn merge_stamp_iff_matching_anchors() {
         let user_b = WalletSim::random(rng);
         let mut pool = PoolSim::genesis(rng);
 
-        pool.advance(
-            usize::try_from(anchor_height_a.0 + 1).expect("fits"),
-            |_| random_block(rng, 1, 50),
-        );
+        pool.advance(anchor_height_a.0 + 1, |_| random_block(rng, 1, 50));
         let anchor_a = pool.anchor();
         let note_a = user_a.random_note(200);
         let (stamp_a, plan_a) = build_output_stamp(rng, anchor_a, note_a);
 
         let n_between = anchor_height_b.0 - anchor_height_a.0;
-        pool.advance(usize::try_from(n_between).expect("fits"), |_| {
-            random_block(rng, 1, 50)
-        });
+        pool.advance(n_between, |_| random_block(rng, 1, 50));
         let anchor_b = pool.anchor();
         let note_b = user_b.random_note(300);
         let (stamp_b, plan_b) = build_output_stamp(rng, anchor_b, note_b);
@@ -131,8 +126,10 @@ fn plan_prove_rejects_invalid_inputs() {
         );
     }
 
-    // Correspondence swap: lengths match, pairing is wrong. SpendBind's
-    // `spendable.cm == note.commitment()` check rejects the mismatched lineage.
+    // Correspondence swap: lengths match, pairing is wrong. Each pair is
+    // internally consistent, so SpendBind binds it; the plan's note is the
+    // odd one out, and SpendStamp's `note.commitment() == cm` check catches
+    // it when the action is proven.
     {
         let plan = Plan::new(two_spends(), alloc::vec![], anchor);
         let pcds = alloc::vec![bundle_b(), bundle_a()];
@@ -142,7 +139,7 @@ fn plan_prove_rejects_invalid_inputs() {
         };
         assert_eq!(
             inner.to_string(),
-            "SpendBind: note does not match the spendable lineage"
+            "SpendStamp: note does not match the spend"
         );
     }
 }
@@ -176,10 +173,10 @@ fn merge_populates_covered_actions() {
     assert_eq!(merged.coverage, expected);
 }
 
-/// Reusing a note as an output collides on the note commitment: each
-/// `OutputStamp`'s sole tachygram is that commitment. The nullifier-side analog
-/// is [`double_spend_cannot_aggregate`] — both reuse modes are caught the same
-/// way once the collision lands in the tachygram set.
+/// Reusing a note as an output collides on both of its tachygrams, since the
+/// commitment and the pad are each derived from the note's fields. The
+/// nullifier-side analog is [`double_spend_cannot_aggregate`]; both reuse modes
+/// are caught the same way once the collision lands in the tachygram set.
 #[test]
 fn double_output_cannot_aggregate() {
     let rng = &mut StdRng::seed_from_u64(0);
@@ -240,14 +237,20 @@ fn double_output_cannot_aggregate() {
         desc_bytes.sort_unstable();
         blake2b::action_descriptor_digest(&desc_bytes)
     };
+    let tachygrams: BTreeSet<Tachygram> = stamp_a
+        .tachygrams
+        .union(&stamp_b.tachygrams)
+        .copied()
+        .collect();
     let stamp = ProofStamp {
         coverage,
         anchor: evil_pcd.data().2,
-        tachygrams: stamp_a
-            .tachygrams
-            .union(&stamp_b.tachygrams)
+        tachygram_set: tachygrams
+            .iter()
             .copied()
-            .collect(),
+            .collect::<TachygramSetPoly>()
+            .commit(),
+        tachygrams,
         proof: Box::new(evil_pcd.proof().clone()),
     };
     let digests: Vec<ActionDigest> = all_descriptors
@@ -361,14 +364,20 @@ fn double_spend_cannot_aggregate() {
         desc_bytes.sort_unstable();
         blake2b::action_descriptor_digest(&desc_bytes)
     };
+    let tachygrams: BTreeSet<Tachygram> = stamp_a
+        .tachygrams
+        .union(&stamp_b.tachygrams)
+        .copied()
+        .collect();
     let stamp = ProofStamp {
         coverage,
         anchor: evil_pcd.data().2,
-        tachygrams: stamp_a
-            .tachygrams
-            .union(&stamp_b.tachygrams)
+        tachygram_set: tachygrams
+            .iter()
             .copied()
-            .collect(),
+            .collect::<TachygramSetPoly>()
+            .commit(),
+        tachygrams,
         proof: Box::new(evil_pcd.proof().clone()),
     };
 
@@ -442,10 +451,16 @@ fn cannot_forge_stamp_covering_duplicated_action() {
         desc_bytes.sort_unstable();
         blake2b::action_descriptor_digest(&desc_bytes)
     };
+    let tachygrams: BTreeSet<Tachygram> = output_stamp.tachygrams.iter().copied().collect();
     let stamp = ProofStamp {
         coverage,
         anchor: evil_pcd.data().2,
-        tachygrams: output_stamp.tachygrams.iter().copied().collect(),
+        tachygram_set: tachygrams
+            .iter()
+            .copied()
+            .collect::<TachygramSetPoly>()
+            .commit(),
+        tachygrams,
         proof: Box::new(evil_pcd.proof().clone()),
     };
 
@@ -593,6 +608,10 @@ fn read_rejects_duplicate_tachygrams() {
     let mut buf = Vec::new();
     buf.extend_from_slice(&[0u8; 32]); // covered actions digest
     Anchor(Fp::ZERO).write(&mut buf).expect("write anchor");
+    TachygramSetPoly::from_iter([tg])
+        .commit()
+        .write(&mut buf)
+        .expect("write tachygram set commitment");
     serialization::write_compactsize(&mut buf, 2).expect("write tachygram count");
     serialization::write_fp(&mut buf, &Fp::from(tg)).expect("write tachygram");
     serialization::write_fp(&mut buf, &Fp::from(tg)).expect("write tachygram");
@@ -631,5 +650,44 @@ fn covered_actions_round_trip() {
 
     assert_eq!(decoded.coverage, stamp.coverage);
     assert_eq!(decoded.anchor, stamp.anchor);
+    assert_eq!(decoded.tachygram_set, stamp.tachygram_set);
     assert_eq!(decoded.tachygrams, stamp.tachygrams);
+}
+
+/// An honest stamp's carried commitment matches its published tachygrams.
+#[test]
+fn accumulating_accepts_honest_stamp() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let wallet = WalletSim::random(rng);
+    let pool = PoolSim::genesis(rng);
+    let note = wallet.random_note(200);
+    let (stamp, _plan) = build_output_stamp(rng, pool.anchor(), note);
+
+    assert!(stamp.is_accumulating());
+}
+
+/// A carried commitment over the wrong tachygrams is rejected, and the
+/// rejection reaches proof verification.
+#[test]
+fn accumulating_rejects_mismatched_commitment() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let wallet = WalletSim::random(rng);
+    let pool = PoolSim::genesis(rng);
+    let note = wallet.random_note(200);
+    let (honest, plan) = build_output_stamp(rng, pool.anchor(), note);
+
+    // Publish the real tachygrams under a commitment to a different set.
+    let other = Tachygram::from(Fp::random(&mut *rng));
+    let forged = ProofStamp {
+        tachygram_set: TachygramSetPoly::from_iter([other]).commit(),
+        ..honest
+    };
+
+    assert!(!forged.is_accumulating());
+    assert!(
+        !forged
+            .verify_proof(rng, [plan.digest().expect("valid plan")])
+            .expect("verify"),
+        "verification must reject an unconfirmed commitment"
+    );
 }

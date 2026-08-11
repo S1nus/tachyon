@@ -5,11 +5,11 @@
 //! multi-stamp / multi-epoch exclusion proof ([`Unspent`]) used by
 //! [`super::spendable::SpendableLift`] to advance a spendable.
 //!
-//! Anchor advances are single-level: every link absorbs one stamp's
-//! tachygram-set commitment into the running [`Anchor`] via
-//! [`Anchor::next_stamp`]. There is no per-block hash domain — block
-//! alignment is a consensus convention (validators check that anchor
-//! endpoints belong to the published per-block anchor sequence).
+//! Anchor advances are single-level: every link absorbs the containing
+//! block's epoch and one stamp's tachygram-set commitment into the running
+//! [`Anchor`] via [`Anchor::next_stamp`]. There is no per-block hash domain;
+//! block alignment is a consensus convention, with validators checking that
+//! anchor endpoints belong to the published per-block anchor sequence.
 
 #![allow(clippy::module_name_repetitions, reason = "intentional names")]
 
@@ -20,13 +20,14 @@ use alloc::{vec, vec::Vec};
 use ff::Field as _;
 use pasta_curves::{Ep, Eq, Fp, Fq};
 use ragu::{
-    Cycle as _, FixedGenerators as _, Header, Index, Pasta, Polynomial, Step, Suffix,
+    Cycle as _, FixedGenerators as _, Header, Index, Pasta, Step, Suffix,
     constraint::{enforce_equal_point, enforce_nonzero, enforce_zero},
 };
 
 use super::delegation::NullifierHeader;
 use crate::{
-    note::{self, Nullifier},
+    note,
+    nullifier::Nullifier,
     primitives::{
         Anchor, EpochIndex, NfSeqCommit, NfSeqPoly, TachygramSetCommit, TachygramSetPoly,
     },
@@ -43,10 +44,10 @@ use crate::{
 /// [`Unspent`] so each step proves nf-exclusion.
 ///
 /// Structurally intra-epoch: the builders ([`AnchorSeed`] / [`EmptyBlockSeed`])
-/// invoke only [`Anchor::next_stamp`] / [`Anchor::next_empty`]. The
-/// [`Anchor::next_epoch`] boundary domain is never a chain link; it is folded
-/// at a crossing by [`UnspentEpochFuse`] and checked against a chain's `start`
-/// by [`super::spendable::SpendableInit`].
+/// invoke only [`Anchor::next_stamp`] / [`Anchor::next_empty`]. Both bind an
+/// epoch, but the [`Anchor::next_epoch`] boundary domain is distinct and never
+/// a chain link; it is folded at a crossing by [`UnspentEpochFuse`] and checked
+/// against a chain's `start` by [`super::spendable::SpendableInit`].
 ///
 /// The within-epoch property pairs with a consensus-side two-epoch
 /// tachygram scan that catches any tachygram already published earlier
@@ -66,7 +67,7 @@ impl Header for AnchorChain {
     /// `(start, end)`. `start` roots in an unbound witness at [`AnchorSeed`] or
     /// [`EmptyBlockSeed`] and flows to [`super::stamp::StampLift`] which must
     /// ultimately be checked by consensus. `end` is always computed in-circuit
-    /// as `start.next_stamp(...)` or `start.next_empty()`.
+    /// as `start.next_stamp(epoch, ...)` or `start.next_empty(epoch)`.
     type Data = (Anchor, Anchor);
 
     const SUFFIX: Suffix = Suffix::new(5);
@@ -168,10 +169,16 @@ impl Header for VerifiedUnspent {
     }
 }
 
-/// Single-stamp [`AnchorChain`] seed. Witness `(start, stamp_commit)`;
-/// emit `(start, start.next_stamp(&stamp_commit))`.
+/// Single-stamp [`AnchorChain`] seed. Witness `(start, epoch, stamp_commit)`;
+/// emit `(start, start.next_stamp(epoch, &stamp_commit))`.
 ///
 /// Used for forward extension (consumed by `StampLift`'s span builder).
+///
+/// # Soundness
+///
+/// `epoch` is unconstrained here. Consensus recomputes the anchor chain from
+/// block data with the containing block's epoch, so a segment built on any
+/// other value ends at an anchor that is not a chain member.
 #[derive(Debug)]
 pub struct AnchorSeed;
 
@@ -180,29 +187,33 @@ impl Step for AnchorSeed {
     type Left = ();
     type Output = AnchorChain;
     type Right = ();
-    /// `(start, stamp_commit)`.
-    type Witness<'source> = (Anchor, TachygramSetCommit);
+    /// `(start, epoch, stamp_commit)`.
+    type Witness<'source> = (Anchor, EpochIndex, TachygramSetCommit);
 
     const INDEX: Index = Index::new(4);
 
     fn witness<'source>(
         &self,
         _ctx: &mut ragu::StepCtx<'_>,
-        (start, stamp_commit): Self::Witness<'source>,
+        (start, epoch, stamp_commit): Self::Witness<'source>,
         _left: <Self::Left as Header>::Data,
         _right: <Self::Right as Header>::Data,
     ) -> ragu::Result<(<Self::Output as Header>::Data, Self::Aux<'source>)> {
-        let end = start.next_stamp(&stamp_commit);
+        let end = start.next_stamp(epoch, &stamp_commit);
         Ok(((start, end), ()))
     }
 }
 
-/// One-empty-block [`AnchorChain`] seed. Witness `(start,)`; emit
-/// `(start, start.next_empty())`.
+/// One-empty-block [`AnchorChain`] seed. Witness `(start, epoch)`; emit
+/// `(start, start.next_empty(epoch))`.
 ///
 /// Advances the anchor through one block that contains zero stamps.
 /// Used alongside [`AnchorSeed`] when an anchor segment must traverse
 /// a mix of empty and non-empty blocks.
+///
+/// # Soundness
+///
+/// `epoch` is unconstrained here, for the reason given on [`AnchorSeed`].
 #[derive(Debug)]
 pub struct EmptyBlockSeed;
 
@@ -211,19 +222,19 @@ impl Step for EmptyBlockSeed {
     type Left = ();
     type Output = AnchorChain;
     type Right = ();
-    /// `(start,)`.
-    type Witness<'source> = (Anchor,);
+    /// `(start, epoch)`.
+    type Witness<'source> = (Anchor, EpochIndex);
 
     const INDEX: Index = Index::new(5);
 
     fn witness<'source>(
         &self,
         _ctx: &mut ragu::StepCtx<'_>,
-        (start,): Self::Witness<'source>,
+        (start, epoch): Self::Witness<'source>,
         _left: <Self::Left as Header>::Data,
         _right: <Self::Right as Header>::Data,
     ) -> ragu::Result<(<Self::Output as Header>::Data, Self::Aux<'source>)> {
-        Ok(((start, start.next_empty()), ()))
+        Ok(((start, start.next_empty(epoch)), ()))
     }
 }
 
@@ -293,7 +304,7 @@ impl Step for UnspentSeed {
         ctx.enforce_poly_query(stamp_tg_set.commit().into(), nf_point, eval)?;
         enforce_nonzero(eval, "UnspentSeed: found nullifier in set")?;
         let stamp_commit = stamp_tg_set.commit();
-        let tested_anchor = anchor_prev.next_stamp(&stamp_commit);
+        let tested_anchor = anchor_prev.next_stamp(epoch, &stamp_commit);
         // Empty elapsed: the sentinel constant `1` commits to `g0`, never the
         // identity point.
         let elapsed_commit = NfSeqCommit::from(g0 * Fp::ONE);
@@ -338,7 +349,7 @@ impl Step for EmptyBlockUnspentSeed {
             .first()
             .expect("at least one generator");
 
-        let tested_anchor = anchor_prev.next_empty();
+        let tested_anchor = anchor_prev.next_empty(epoch);
         // Empty elapsed: the sentinel constant `1` commits to `g0`, never the
         // identity point.
         let elapsed_commit = NfSeqCommit::from(g0 * Fp::ONE);
@@ -421,10 +432,7 @@ impl Step for UnspentFuse {
             "UnspentFuse: halves disagree on the junction nullifier",
         )?;
         let combined_commit = combined_elapsed_seq.commit();
-        let offset =
-            usize::try_from(left_epoch_end.0 - left_epoch_start.0).map_err(|_too_many_epochs| {
-                ragu::Error::InvalidWitness("UnspentFuse: crossing count exceeds usize".into())
-            })?;
+        let offset = left_epoch_end - left_epoch_start;
         // Sentinel concat: a sequence of `k` members is `Σ n_i·X^i + X^k`, so
         // `combined = left ++ right` is the shifted combination
         // `combined(X) = left(X) + X^offset·right(X) - X^offset`. The
@@ -435,11 +443,11 @@ impl Step for UnspentFuse {
         enforce_shifted_combination(
             ctx,
             [
-                (&Polynomial::from(left_elapsed_seq), 0),
-                (&Polynomial::from(right_elapsed_seq), offset),
+                (left_elapsed_seq.as_ref(), 0),
+                (right_elapsed_seq.as_ref(), offset.into()),
             ],
-            [(-Fp::ONE, offset)],
-            &Polynomial::from(combined_elapsed_seq),
+            [(-Fp::ONE, offset.into())],
+            combined_elapsed_seq.as_ref(),
             "UnspentFuse: combined is not the concatenation of the halves",
         )?;
         Ok((
@@ -512,10 +520,7 @@ impl Step for UnspentEpochFuse {
             "UnspentEpochFuse: boundary anchor does not match right.anchor_prev",
         )?;
         let combined_commit = combined_elapsed_seq.commit();
-        let offset =
-            usize::try_from(left_epoch_end.0 - left_epoch_start.0).map_err(|_too_many_epochs| {
-                ragu::Error::InvalidWitness("UnspentEpochFuse: crossing count exceeds usize".into())
-            })?;
+        let offset = left_epoch_end - left_epoch_start;
         // Sentinel splice: a sequence of `k` members is `Σ n_i·X^i + X^k`, so
         // `combined = left ++ [left_nf_end] ++ right` is the shifted
         // combination `combined(X) = left(X) + (left_nf_end - 1)·X^offset +
@@ -527,11 +532,11 @@ impl Step for UnspentEpochFuse {
         enforce_shifted_combination(
             ctx,
             [
-                (&Polynomial::from(left_elapsed_seq), 0),
-                (&Polynomial::from(right_elapsed_seq), offset + 1),
+                (left_elapsed_seq.as_ref(), 0),
+                (right_elapsed_seq.as_ref(), u64::from(offset) + 1),
             ],
-            [(Fp::from(left_nf_end) - Fp::ONE, offset)],
-            &Polynomial::from(combined_elapsed_seq),
+            [(Fp::from(left_nf_end) - Fp::ONE, offset.into())],
+            combined_elapsed_seq.as_ref(),
             "UnspentEpochFuse: combined is not the splice of the halves",
         )?;
         Ok((
@@ -599,11 +604,7 @@ impl Step for VerifyUnspent {
             Eq::from(nf_seq_commit),
             "VerifyUnspent: range polynomial does not match header",
         )?;
-        let offset = usize::try_from(unspent_epoch_end.0 - unspent_epoch_start.0).map_err(
-            |_too_many_epochs| {
-                ragu::Error::InvalidWitness("VerifyUnspent: crossing count exceeds usize".into())
-            },
-        )?;
+        let offset = unspent_epoch_end - unspent_epoch_start;
         // Sentinel append: a sequence of `k` members is `Σ n_i·X^i + X^k`, so
         // `nf_seq = elapsed ++ [unspent_nf_end]` is the shifted combination
         // `nf_seq(X) = elapsed(X) + (unspent_nf_end - 1)·X^offset +
@@ -614,12 +615,12 @@ impl Step for VerifyUnspent {
         // [`Unspent`] PCD; `offset` is elapsed's header-fixed span.
         enforce_shifted_combination(
             ctx,
-            [(&Polynomial::from(elapsed_seq), 0)],
+            [(elapsed_seq.as_ref(), 0)],
             [
-                (Fp::from(unspent_nf_end) - Fp::ONE, offset),
-                (Fp::ONE, offset + 1),
+                (Fp::from(unspent_nf_end) - Fp::ONE, offset.into()),
+                (Fp::ONE, u64::from(offset) + 1),
             ],
-            &Polynomial::from(nf_seq),
+            nf_seq.as_ref(),
             "VerifyUnspent: range is not elapsed followed by the tip",
         )?;
         // Bind the unspent's free-witness boundary nullifiers to the range's

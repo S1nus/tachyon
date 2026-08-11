@@ -1,7 +1,7 @@
 //! Utilities for preparing step witnesses.
 //!
 //! One function per [`Step`] with a non-empty witness: it assembles the step's
-//! [`Witness`](ragu::Step::Witness) tuple from raw inputs (interpolating
+//! [`Witness`](Step::Witness) tuple from raw inputs (interpolating
 //! nullifiers and tachygrams into the polynomials the step opens against),
 //! ready to seed or fuse through `PROOF_SYSTEM`. Functions are named after the
 //! step they serve. Steps with an empty `()` witness need no utility.
@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use ragu::{Header, Step};
 
 use crate::{
-    note::Nullifier,
+    nullifier::Nullifier,
     primitives::{
         ActionDigest, ActionSetPoly, Anchor, EpochIndex, NfSeqPoly, Tachygram, TachygramSetPoly,
     },
@@ -70,8 +70,7 @@ pub fn unspent_fuse(
     left_elapsed: &[Nullifier],
     right_elapsed: &[Nullifier],
 ) -> StepWitness<'static, UnspentFuse> {
-    let mut combined: Vec<Nullifier> = left_elapsed.to_vec();
-    combined.extend_from_slice(right_elapsed);
+    let combined = [left_elapsed, right_elapsed].concat();
     (
         left_elapsed.iter().copied().collect::<NfSeqPoly>(),
         combined.into_iter().collect::<NfSeqPoly>(),
@@ -88,9 +87,7 @@ pub fn unspent_epoch_fuse(
     right_elapsed: &[Nullifier],
 ) -> StepWitness<'static, UnspentEpochFuse> {
     let (_, _, _, (_, nf_end), _) = left;
-    let mut combined: Vec<Nullifier> = left_elapsed.to_vec();
-    combined.push(nf_end);
-    combined.extend_from_slice(right_elapsed);
+    let combined = [left_elapsed, &[nf_end], right_elapsed].concat();
     (
         left_elapsed.iter().copied().collect::<NfSeqPoly>(),
         combined.into_iter().collect::<NfSeqPoly>(),
@@ -134,15 +131,17 @@ pub fn spendable_init(
     )
 }
 
-/// Prepare the witness for [`AnchorSeed`]: `(start, stamp_commit)`.
+/// Prepare the witness for [`AnchorSeed`]: `(start, epoch, stamp_commit)`.
 #[must_use]
 pub fn anchor_seed(
     (_left, _right): (StepLeft<AnchorSeed>, StepRight<AnchorSeed>),
     start: Anchor,
+    epoch: EpochIndex,
     tgs: &[Tachygram],
 ) -> StepWitness<'static, AnchorSeed> {
     (
         start,
+        epoch,
         tgs.iter().copied().collect::<TachygramSetPoly>().commit(),
     )
 }

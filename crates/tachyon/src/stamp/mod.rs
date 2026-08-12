@@ -14,7 +14,8 @@ use ff::PrimeField as _;
 use pasta_curves::Fp;
 use proof::{
     PROOF_SYSTEM, output,
-    stamp::{MergeStamp, OutputStamp, SpendStamp, StampHeader},
+    pool::{AnchorChain, AnchorFuse, AnchorSeed, EmptyBlockSeed},
+    stamp::{MergeStamp, OutputStamp, SpendStamp, StampHeader, StampLift},
 };
 use ragu::{self, proof::PROOF_SIZE_COMPRESSED};
 use rand_core::{CryptoRng, RngCore};
@@ -26,7 +27,9 @@ use crate::{
     effect,
     entropy::ActionRandomizer,
     keys::ProofAuthorizingKey,
-    primitives::{ActionDigest, ActionDigestError, Anchor, Tachygram, TachygramSetCommit},
+    primitives::{
+        ActionDigest, ActionDigestError, Anchor, EpochIndex, Tachygram, TachygramSetCommit,
+    },
     serialization,
     stamp::proof::{delegation, spend, spendable},
     value,
@@ -456,6 +459,18 @@ pub enum ProveError {
     /// Stamp merge failed; carries the underlying step-level error.
     #[display("stamp merge failed: {_0}")]
     MergeFailed(ragu::Error),
+    /// A lift was asked for over an empty anchor chain, which would leave the
+    /// stamp where it is.
+    #[display("anchor chain has no links")]
+    LiftEmptyChain,
+    /// A lift was asked for over links from more than one epoch.
+    /// [`AnchorChain`] has no epoch-boundary link, so a segment cannot cross
+    /// one.
+    #[display("anchor chain spans more than one epoch")]
+    LiftAcrossEpochs,
+    /// Stamp lift failed; carries the underlying step-level error.
+    #[display("stamp lift failed: {_0}")]
+    LiftFailed(ragu::Error),
     /// Number of spendable PCDs doesn't match number of spends.
     #[display("spendable PCD count mismatch")]
     SpendableMismatch,
@@ -500,6 +515,112 @@ type StampComponents = (
     Anchor,
     Box<ragu::Proof>,
 );
+
+/// One block's contribution to the anchor chain, as replayed by
+/// [`ProofStamp::lift`].
+///
+/// A node reads these straight off the chain: a block contributes one
+/// [`AnchorLink::Stamp`] per stamp it absorbs, in stamp order, or a single
+/// [`AnchorLink::Empty`] when it absorbs none. That is the same fold
+/// [`Anchor::next_stamp`] and [`Anchor::next_empty`] perform, so a link
+/// sequence and the anchors it produces are two views of one chain.
+///
+/// An epoch boundary has no link: [`AnchorChain`] cannot express one, so a lift
+/// cannot cross one.
+#[derive(Clone, Copy, Debug, PartialEq, TotalEq)]
+#[expect(
+    variant_size_differences,
+    reason = "a stamp link carries a curve point and an empty link carries \
+              nothing; boxing it would cost an allocation per link and drop Copy"
+)]
+pub enum AnchorLink {
+    /// One stamp absorbed by a block in `epoch`.
+    Stamp {
+        /// The epoch of the block containing the stamp.
+        epoch: EpochIndex,
+        /// The absorbed stamp's tachygram-set commitment.
+        tachygram_set: TachygramSetCommit,
+    },
+    /// One block in `epoch` that absorbs no stamps.
+    Empty {
+        /// The epoch of the empty block.
+        epoch: EpochIndex,
+    },
+}
+
+impl AnchorLink {
+    /// The epoch of the block this link came from.
+    #[must_use]
+    pub const fn epoch(self) -> EpochIndex {
+        match self {
+            Self::Stamp { epoch, .. } | Self::Empty { epoch } => epoch,
+        }
+    }
+
+    /// Advance `anchor` across this link, matching what the circuit computes.
+    ///
+    /// Folding [`AnchorLink::advance`] over a link sequence gives the anchor a
+    /// [`ProofStamp::lift`] over that sequence lands on, without proving
+    /// anything — which is how a caller picks the links that reach a target.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a [`AnchorLink::Stamp`] link's `tachygram_set` is the identity
+    /// point. No real stamp produces one: the set polynomial is monic, so its
+    /// commitment is never the identity.
+    #[must_use]
+    pub fn advance(self, anchor: Anchor) -> Anchor {
+        match self {
+            Self::Stamp {
+                epoch,
+                tachygram_set,
+            } => anchor.next_stamp(epoch, &tachygram_set),
+            Self::Empty { epoch } => anchor.next_empty(epoch),
+        }
+    }
+}
+
+/// Seeds the one-link [`AnchorChain`] segment that `link` spans, rooted at
+/// `start`.
+fn seed_anchor_link<RNG: RngCore + CryptoRng>(
+    rng: &mut RNG,
+    start: Anchor,
+    link: AnchorLink,
+) -> Result<ragu::Pcd<AnchorChain>, ragu::Error> {
+    let (seed, ()) = match link {
+        AnchorLink::Stamp {
+            epoch,
+            tachygram_set,
+        } => PROOF_SYSTEM.seed(rng, AnchorSeed, (start, epoch, tachygram_set))?,
+        AnchorLink::Empty { epoch } => PROOF_SYSTEM.seed(rng, EmptyBlockSeed, (start, epoch))?,
+    };
+
+    Ok(seed)
+}
+
+/// Builds the [`AnchorChain`] segment rooted at `start` that spans `first`
+/// followed by `rest`, by seeding each link and composing adjacent segments.
+///
+/// Taking the first link separately keeps the segment non-empty by
+/// construction: [`AnchorChain`] has no identity element to start a fold from.
+fn build_anchor_chain<RNG: RngCore + CryptoRng>(
+    rng: &mut RNG,
+    start: Anchor,
+    (first, rest): (AnchorLink, &[AnchorLink]),
+) -> Result<ragu::Pcd<AnchorChain>, ragu::Error> {
+    let mut chain = seed_anchor_link(rng, start, first)?;
+    let mut state = first.advance(start);
+
+    for &link in rest {
+        let seed = seed_anchor_link(rng, state, link)?;
+        state = link.advance(state);
+
+        let (fused, ()) = PROOF_SYSTEM.fuse(rng, AnchorFuse, (), chain, seed)?;
+        chain = fused;
+    }
+
+    Ok(chain)
+}
 
 impl ProofStamp {
     /// Proves a single output action, returning the stamp components
@@ -693,6 +814,100 @@ impl ProofStamp {
             tachygram_set,
             tachygrams,
             proof,
+        })
+    }
+
+    /// Advances this stamp's anchor along `links`, so it can [`merge`] with
+    /// stamps that already sit at the later anchor.
+    ///
+    /// [`MergeStamp`] constrains both sides to one anchor, but wallets stamp
+    /// against whatever anchor was current when they built, and every block
+    /// mints a new one. Lifting is what lets an aggregator collect stamps from
+    /// different heights into a single merge.
+    ///
+    /// `links` is the anchor chain strictly after the stamp's current anchor,
+    /// in block order, up to and including the target — see [`AnchorLink`]. The
+    /// stamp pairs with the descriptors of its covered actions, as it does for
+    /// [`merge`], because the PCD header is reconstructed rather than stored.
+    ///
+    /// Only `anchor` and `proof` change. [`StampLift`] passes the action and
+    /// tachygram commitments through untouched, so `coverage`, `tachygrams`,
+    /// and `tachygram_set` all survive the lift, and a lifted stamp still
+    /// covers exactly the actions it covered before.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProveError::LiftEmptyChain`] if `links` is empty, and
+    /// [`ProveError::LiftAcrossEpochs`] if the links do not all share one
+    /// epoch, since [`AnchorChain`] has no epoch-boundary link.
+    ///
+    /// The caller must also keep the stamp's own anchor inside that epoch,
+    /// which this function cannot check: an anchor is a field element and
+    /// carries no height. Lifting from the last anchor of one epoch skips the
+    /// [`Anchor::next_epoch`] fold the real chain performs, and lands off the
+    /// published sequence — accepted here, rejected later by consensus anchor
+    /// membership.
+    ///
+    /// [`merge`]: ProofStamp::merge
+    pub fn lift<RNG: RngCore + CryptoRng>(
+        rng: &mut RNG,
+        (stamp, descriptors): (Self, BTreeSet<action::Descriptor>),
+        links: &[AnchorLink],
+    ) -> Result<Self, ProveError> {
+        let Some((&first, rest)) = links.split_first() else {
+            return Err(ProveError::LiftEmptyChain);
+        };
+
+        let epoch = first.epoch();
+        if rest.iter().any(|link| link.epoch() != epoch) {
+            return Err(ProveError::LiftAcrossEpochs);
+        }
+
+        let Self {
+            coverage,
+            anchor,
+            tachygrams,
+            proof,
+            ..
+        } = stamp;
+
+        let action_commit = descriptors
+            .iter()
+            .map(action::Descriptor::digest)
+            .collect::<Result<BTreeSet<ActionDigest>, ActionDigestError>>()
+            .map_err(ProveError::ActionDigest)?
+            .into_iter()
+            .collect::<ActionSetPoly>()
+            .commit();
+
+        // Recomputed rather than read off the stamp, as `prove_merge` does: the
+        // proof binds the accumulator the circuit witnessed, so a carried
+        // `tachygram_set` disagreeing with `tachygrams` fails the fuse instead
+        // of riding along.
+        let tachygram_commit = tachygrams
+            .iter()
+            .copied()
+            .collect::<TachygramSetPoly>()
+            .commit();
+
+        let stamp_pcd = proof.carry::<StampHeader>((action_commit, tachygram_commit, anchor));
+        let chain =
+            build_anchor_chain(rng, anchor, (first, rest)).map_err(ProveError::LiftFailed)?;
+
+        let (pcd, ()) = PROOF_SYSTEM
+            .fuse(rng, StampLift, (), stamp_pcd, chain)
+            .map_err(ProveError::LiftFailed)?;
+        let lifted_anchor = pcd.data().2;
+        let rerand = PROOF_SYSTEM
+            .rerandomize(pcd, rng)
+            .map_err(ProveError::LiftFailed)?;
+
+        Ok(Self {
+            coverage,
+            anchor: lifted_anchor,
+            tachygram_set: tachygram_commit,
+            tachygrams,
+            proof: Box::new(rerand.proof().clone()),
         })
     }
 

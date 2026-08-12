@@ -10,8 +10,9 @@ use crate::{
     action,
     constants::EPOCH_SIZE,
     fixtures::{
-        PoolSim, WalletSim, build_autonome, build_output_stamp, forge_overlapping_merge,
-        random_action, random_block, random_block_with, shared_sk, spend_witness,
+        PoolSim, WalletSim, anchor_links_between, build_autonome, build_output_stamp,
+        forge_overlapping_merge, random_action, random_block, random_block_with, shared_sk,
+        spend_witness,
     },
     primitives::BlockHeight,
 };
@@ -689,5 +690,173 @@ fn accumulating_rejects_mismatched_commitment() {
             .verify_proof(rng, [plan.digest().expect("valid plan")])
             .expect("verify"),
         "verification must reject an unconfirmed commitment"
+    );
+}
+
+/// A lift lands on the anchor the chain itself produces, and leaves everything
+/// but the anchor and the proof untouched.
+#[test]
+fn lift_lands_on_chain_anchor() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let wallet = WalletSim::random(rng);
+    let mut pool = PoolSim::genesis(rng);
+
+    pool.advance(1, |_| random_block(rng, 1, 4));
+    let stamp_height = pool.height();
+    let note = wallet.random_note(200);
+    let (stamp, plan) = build_output_stamp(rng, pool.anchor_at(stamp_height), note);
+
+    // A mix of stamp-bearing and empty blocks, so both link kinds are exercised.
+    pool.advance(2, |_| random_block(rng, 1, 3));
+    pool.advance(1, |_| random_block(rng, 1, 0));
+    pool.advance(1, |_| random_block(rng, 1, 2));
+    let target_height = pool.height();
+
+    let links = anchor_links_between(
+        &pool,
+        stamp_height.next().expect("height < max")..=target_height,
+    );
+    assert!(
+        links
+            .iter()
+            .any(|link| matches!(link, AnchorLink::Empty { .. })),
+        "the chain must cover the empty block"
+    );
+
+    // `advance` predicts the same anchor the proof lands on, so a caller can
+    // pick links without proving.
+    let predicted = links
+        .iter()
+        .fold(stamp.anchor, |anchor, link| link.advance(anchor));
+    assert_eq!(predicted, pool.anchor_at(target_height));
+
+    let before = stamp.clone();
+    let lifted = ProofStamp::lift(
+        rng,
+        (stamp, BTreeSet::from_iter([plan.descriptor()])),
+        &links,
+    )
+    .expect("lift");
+
+    assert_eq!(
+        lifted.anchor,
+        pool.anchor_at(target_height),
+        "lift must land on the chain's anchor at the target height"
+    );
+    assert_eq!(lifted.coverage, before.coverage, "coverage survives a lift");
+    assert_eq!(
+        lifted.tachygrams, before.tachygrams,
+        "tachygrams survive a lift"
+    );
+    assert_eq!(
+        lifted.tachygram_set, before.tachygram_set,
+        "the tachygram commitment survives a lift"
+    );
+
+    // The lifted proof still verifies against the actions it covered before.
+    assert!(
+        lifted
+            .verify_proof(rng, [plan.digest().expect("valid plan")])
+            .expect("verify"),
+        "a lifted stamp must still prove its own actions"
+    );
+}
+
+/// Lifting is what lets stamps built at different heights merge: the same pair
+/// that `merge` rejects on mismatched anchors succeeds once one side is lifted.
+#[test]
+fn lift_enables_merge_across_anchors() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let wallet = WalletSim::random(rng);
+    let mut pool = PoolSim::genesis(rng);
+
+    pool.advance(1, |_| random_block(rng, 1, 4));
+    let early_height = pool.height();
+    let note_a = wallet.random_note(200);
+    let (stamp_a, plan_a) = build_output_stamp(rng, pool.anchor_at(early_height), note_a);
+
+    pool.advance(3, |_| random_block(rng, 1, 2));
+    let late_height = pool.height();
+    let note_b = wallet.random_note(300);
+    let (stamp_b, plan_b) = build_output_stamp(rng, pool.anchor_at(late_height), note_b);
+
+    let descriptors_a = BTreeSet::from_iter([plan_a.descriptor()]);
+    let descriptors_b = BTreeSet::from_iter([plan_b.descriptor()]);
+
+    // Mismatched anchors: no merge.
+    assert!(
+        ProofStamp::merge(
+            rng,
+            (stamp_a.clone(), descriptors_a.clone()),
+            (stamp_b.clone(), descriptors_b.clone()),
+        )
+        .is_err(),
+        "stamps at different anchors must not merge"
+    );
+
+    let links = anchor_links_between(
+        &pool,
+        early_height.next().expect("height < max")..=late_height,
+    );
+    let lifted_a = ProofStamp::lift(rng, (stamp_a, descriptors_a.clone()), &links).expect("lift");
+    assert_eq!(
+        lifted_a.anchor, stamp_b.anchor,
+        "lift must reach b's anchor"
+    );
+
+    let merged = ProofStamp::merge(
+        rng,
+        (lifted_a, descriptors_a.clone()),
+        (stamp_b, descriptors_b.clone()),
+    )
+    .expect("merge after lift");
+
+    let digests = [
+        plan_a.digest().expect("valid plan"),
+        plan_b.digest().expect("valid plan"),
+    ];
+    assert!(
+        merged.verify_proof(rng, digests).expect("verify"),
+        "the merged stamp must cover both sides' actions"
+    );
+    assert!(
+        merged.is_covering(descriptors_a.union(&descriptors_b).copied()),
+        "the merged coverage digest must span both descriptor sets"
+    );
+}
+
+/// The two shapes of link list a lift refuses, before any proving happens.
+#[test]
+fn lift_rejects_unusable_chains() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let wallet = WalletSim::random(rng);
+    let mut pool = PoolSim::genesis(rng);
+
+    pool.advance(1, |_| random_block(rng, 1, 4));
+    let stamp_height = pool.height();
+    let note = wallet.random_note(200);
+    let (stamp, plan) = build_output_stamp(rng, pool.anchor_at(stamp_height), note);
+    let descriptors = BTreeSet::from_iter([plan.descriptor()]);
+
+    let err = ProofStamp::lift(rng, (stamp.clone(), descriptors.clone()), &[]).unwrap_err();
+    assert!(
+        matches!(err, ProveError::LiftEmptyChain),
+        "an empty chain must be refused, got {err}"
+    );
+
+    // `AnchorChain` has no epoch-boundary link, so a segment may not span two
+    // epochs.
+    let straddling = vec![
+        AnchorLink::Empty {
+            epoch: EpochIndex(0),
+        },
+        AnchorLink::Empty {
+            epoch: EpochIndex(1),
+        },
+    ];
+    let straddling_err = ProofStamp::lift(rng, (stamp, descriptors), &straddling).unwrap_err();
+    assert!(
+        matches!(straddling_err, ProveError::LiftAcrossEpochs),
+        "a chain spanning two epochs must be refused, got {straddling_err}"
     );
 }

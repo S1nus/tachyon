@@ -39,4 +39,6 @@ pub use bundle::{
 pub use note::Note;
 pub use primitives::*;
 pub use serialization::compactsize::{CompactSize, CompactSizeError};
-pub use stamp::{AggregateIdError, Plan as StampPlan, PointerStamp, ProofStamp, Unproven};
+pub use stamp::{
+    AggregateIdError, AnchorLink, Plan as StampPlan, PointerStamp, ProofStamp, Unproven,
+};

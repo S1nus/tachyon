@@ -3,6 +3,7 @@
 use alloc::{boxed::Box, string::ToString as _, vec, vec::Vec};
 
 use ff::Field as _;
+use group::Group as _;
 use rand::{SeedableRng as _, rngs::StdRng};
 
 use super::*;
@@ -10,7 +11,7 @@ use crate::{
     action,
     constants::EPOCH_SIZE,
     fixtures::{
-        PoolSim, WalletSim, anchor_links_between, build_autonome, build_output_stamp,
+        PoolSim, WalletSim, anchor_steps_between, build_autonome, build_output_stamp,
         forge_overlapping_merge, random_action, random_block, random_block_with, shared_sk,
         spend_witness,
     },
@@ -705,6 +706,9 @@ fn lift_lands_on_chain_anchor() {
     let stamp_height = pool.height();
     let note = wallet.random_note(200);
     let (stamp, plan) = build_output_stamp(rng, pool.anchor_at(stamp_height), note);
+    let second_note = wallet.random_note(300);
+    let (second_stamp, second_plan) =
+        build_output_stamp(rng, pool.anchor_at(stamp_height), second_note);
 
     // A mix of stamp-bearing and empty blocks, so both link kinds are exercised.
     pool.advance(2, |_| random_block(rng, 1, 3));
@@ -712,29 +716,37 @@ fn lift_lands_on_chain_anchor() {
     pool.advance(1, |_| random_block(rng, 1, 2));
     let target_height = pool.height();
 
-    let links = anchor_links_between(
+    let steps = anchor_steps_between(
         &pool,
         stamp_height.next().expect("height < max")..=target_height,
     );
     assert!(
-        links
-            .iter()
-            .any(|link| matches!(link, AnchorLink::Empty { .. })),
+        steps.iter().any(|step| step.is_empty_block()),
         "the chain must cover the empty block"
     );
 
     // `advance` predicts the same anchor the proof lands on, so a caller can
     // pick links without proving.
-    let predicted = links
+    let epoch = stamp_height.epoch();
+    let predicted = steps
         .iter()
-        .fold(stamp.anchor, |anchor, link| link.advance(anchor));
+        .fold(stamp.anchor, |anchor, step| step.advance(anchor, epoch));
     assert_eq!(predicted, pool.anchor_at(target_height));
+
+    let segment = AnchorSegment::prove(
+        rng,
+        stamp.anchor,
+        epoch,
+        pool.anchor_at(target_height),
+        &steps,
+    )
+    .expect("segment");
 
     let before = stamp.clone();
     let lifted = ProofStamp::lift(
         rng,
         (stamp, BTreeSet::from_iter([plan.descriptor()])),
-        &links,
+        &segment,
     )
     .expect("lift");
 
@@ -759,6 +771,21 @@ fn lift_lands_on_chain_anchor() {
             .verify_proof(rng, [plan.digest().expect("valid plan")])
             .expect("verify"),
         "a lifted stamp must still prove its own actions"
+    );
+
+    let lifted_second = ProofStamp::lift(
+        rng,
+        (
+            second_stamp,
+            BTreeSet::from_iter([second_plan.descriptor()]),
+        ),
+        &segment,
+    )
+    .expect("reuse segment");
+    assert_eq!(
+        lifted_second.anchor,
+        pool.anchor_at(target_height),
+        "a segment proof can be reused for another stamp at the same anchor"
     );
 }
 
@@ -794,11 +821,19 @@ fn lift_enables_merge_across_anchors() {
         "stamps at different anchors must not merge"
     );
 
-    let links = anchor_links_between(
+    let steps = anchor_steps_between(
         &pool,
         early_height.next().expect("height < max")..=late_height,
     );
-    let lifted_a = ProofStamp::lift(rng, (stamp_a, descriptors_a.clone()), &links).expect("lift");
+    let segment = AnchorSegment::prove(
+        rng,
+        stamp_a.anchor,
+        early_height.epoch(),
+        stamp_b.anchor,
+        &steps,
+    )
+    .expect("segment");
+    let lifted_a = ProofStamp::lift(rng, (stamp_a, descriptors_a.clone()), &segment).expect("lift");
     assert_eq!(
         lifted_a.anchor, stamp_b.anchor,
         "lift must reach b's anchor"
@@ -825,9 +860,9 @@ fn lift_enables_merge_across_anchors() {
     );
 }
 
-/// The two shapes of link list a lift refuses, before any proving happens.
+/// Invalid steps and unusable segment shapes fail before stamp lifting.
 #[test]
-fn lift_rejects_unusable_chains() {
+fn lift_rejects_unusable_segments() {
     let rng = &mut StdRng::seed_from_u64(0);
     let wallet = WalletSim::random(rng);
     let mut pool = PoolSim::genesis(rng);
@@ -838,25 +873,57 @@ fn lift_rejects_unusable_chains() {
     let (stamp, plan) = build_output_stamp(rng, pool.anchor_at(stamp_height), note);
     let descriptors = BTreeSet::from_iter([plan.descriptor()]);
 
-    let err = ProofStamp::lift(rng, (stamp.clone(), descriptors.clone()), &[]).unwrap_err();
+    let identity = TachygramSetCommit::from(pasta_curves::Eq::identity());
+    let step_err = AnchorStep::stamp(identity).unwrap_err();
     assert!(
-        matches!(err, ProveError::LiftEmptyChain),
-        "an empty chain must be refused, got {err}"
+        matches!(step_err, AnchorStepError::IdentityTachygramSet),
+        "identity commitments must be refused, got {step_err}"
     );
 
-    // `AnchorChain` has no epoch-boundary link, so a segment may not span two
-    // epochs.
-    let straddling = vec![
-        AnchorLink::Empty {
-            epoch: EpochIndex(0),
-        },
-        AnchorLink::Empty {
-            epoch: EpochIndex(1),
-        },
-    ];
-    let straddling_err = ProofStamp::lift(rng, (stamp, descriptors), &straddling).unwrap_err();
+    let empty_err =
+        AnchorSegment::prove(rng, stamp.anchor, stamp_height.epoch(), stamp.anchor, &[])
+            .unwrap_err();
     assert!(
-        matches!(straddling_err, ProveError::LiftAcrossEpochs),
-        "a chain spanning two epochs must be refused, got {straddling_err}"
+        matches!(empty_err, AnchorSegmentError::Empty),
+        "an empty segment must be refused, got {empty_err}"
+    );
+
+    // The first block of epoch 1 includes a `next_epoch` transition that an
+    // intra-epoch AnchorSegment cannot express, so its real chain endpoint
+    // cannot be reached by folding only that block's steps.
+    while pool.height() < BlockHeight(EPOCH_SIZE - 1) {
+        pool.advance(1, |_| random_block(rng, 1, 1));
+    }
+    let pre_boundary = pool.anchor();
+    pool.advance(1, |_| random_block(rng, 1, 2));
+    let epoch_first = pool.height();
+    let steps = anchor_steps_between(&pool, epoch_first..=epoch_first);
+    let boundary_err = AnchorSegment::prove(
+        rng,
+        pre_boundary,
+        epoch_first.epoch(),
+        pool.anchor_at(epoch_first),
+        &steps,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(boundary_err, AnchorSegmentError::EndMismatch { .. }),
+        "a segment that skips the epoch transition must be refused, got {boundary_err}"
+    );
+
+    let wrong_start = Anchor::default();
+    let wrong_steps = [AnchorStep::empty_block()];
+    let wrong_segment = AnchorSegment::prove(
+        rng,
+        wrong_start,
+        EpochIndex(0),
+        wrong_steps[0].advance(wrong_start, EpochIndex(0)),
+        &wrong_steps,
+    )
+    .expect("valid segment at the wrong start");
+    let start_err = ProofStamp::lift(rng, (stamp, descriptors), &wrong_segment).unwrap_err();
+    assert!(
+        matches!(start_err, ProveError::LiftStartMismatch { .. }),
+        "a segment rooted away from the stamp must be refused, got {start_err}"
     );
 }

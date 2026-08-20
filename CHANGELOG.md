@@ -9,15 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `ProofStamp::lift`, which advances a stamp's anchor along a chain of
-  `AnchorLink`s. `MergeStamp` constrains both sides of a merge to one anchor,
+- `ProofStamp::lift`, which advances a stamp's anchor along a reusable
+  `AnchorSegment`. `MergeStamp` constrains both sides of a merge to one anchor,
   but wallets stamp against whatever anchor was current when they built, so an
-  aggregator collecting stamps from different heights had no way to align them.
-  Lifting is the "match/update anchors" step of the aggregation process.
-- `AnchorLink`, one block's contribution to the anchor chain: a `Stamp` link per
-  stamp absorbed, or an `Empty` link for a block absorbing none.
-  `AnchorLink::advance` folds a link over an anchor without proving, so a caller
-  can pick the links reaching a target anchor before paying for a lift.
+  aggregator collecting stamps from different heights had no way to align
+  them. Lifting is the "match/update anchors" step of aggregation.
+- `AnchorStep` and `AnchorSegment`, the validated, intra-epoch view of an anchor
+  chain. A node supplies one stamp step per absorbed proof stamp, in transaction
+  order, or one empty-block step for a block absorbing none. Segment
+  construction checks the predicted endpoint against consensus state before
+  proving, and the resulting proof can be reused for stamps at the same anchor.
 
   Both are wrappers over the already-registered `StampLift`, `AnchorSeed`,
   `EmptyBlockSeed`, and `AnchorFuse` steps: no circuit, step registration, or

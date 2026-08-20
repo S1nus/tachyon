@@ -7,10 +7,12 @@ extern crate alloc;
 pub mod proof;
 
 use alloc::{boxed::Box, collections::BTreeSet, vec, vec::Vec};
+use core::fmt;
 
 use corez::io::{self, Read, Write};
 use derive_more::{Debug, Display, Eq as TotalEq, Error, Into, PartialEq};
 use ff::PrimeField as _;
+use group::Group as _;
 use pasta_curves::Fp;
 use proof::{
     PROOF_SYSTEM, output,
@@ -459,15 +461,14 @@ pub enum ProveError {
     /// Stamp merge failed; carries the underlying step-level error.
     #[display("stamp merge failed: {_0}")]
     MergeFailed(ragu::Error),
-    /// A lift was asked for over an empty anchor chain, which would leave the
-    /// stamp where it is.
-    #[display("anchor chain has no links")]
-    LiftEmptyChain,
-    /// A lift was asked for over links from more than one epoch.
-    /// [`AnchorChain`] has no epoch-boundary link, so a segment cannot cross
-    /// one.
-    #[display("anchor chain spans more than one epoch")]
-    LiftAcrossEpochs,
+    /// A lift's segment does not start at the stamp's anchor.
+    #[display("anchor segment starts at {segment_start:?}, stamp is at {stamp_anchor:?}")]
+    LiftStartMismatch {
+        /// The stamp's current anchor.
+        stamp_anchor: Anchor,
+        /// The supplied segment's starting anchor.
+        segment_start: Anchor,
+    },
     /// Stamp lift failed; carries the underlying step-level error.
     #[display("stamp lift failed: {_0}")]
     LiftFailed(ragu::Error),
@@ -516,104 +517,204 @@ type StampComponents = (
     Box<ragu::Proof>,
 );
 
-/// One block's contribution to the anchor chain, as replayed by
-/// [`ProofStamp::lift`].
+/// An invalid [`AnchorStep`].
+#[derive(Clone, Copy, Debug, Display, Error, PartialEq, TotalEq)]
+#[non_exhaustive]
+pub enum AnchorStepError {
+    /// A stamp step carried the identity point instead of a real set
+    /// commitment.
+    #[display("stamp tachygram-set commitment is the identity point")]
+    IdentityTachygramSet,
+}
+
+/// One transition in an intra-epoch anchor segment.
 ///
-/// A node reads these straight off the chain: a block contributes one
-/// [`AnchorLink::Stamp`] per stamp it absorbs, in stamp order, or a single
-/// [`AnchorLink::Empty`] when it absorbs none. That is the same fold
-/// [`Anchor::next_stamp`] and [`Anchor::next_empty`] perform, so a link
-/// sequence and the anchors it produces are two views of one chain.
-///
-/// An epoch boundary has no link: [`AnchorChain`] cannot express one, so a lift
-/// cannot cross one.
+/// A node derives these from validated blocks: one stamp step per proof stamp,
+/// in transaction order, or one empty-block step when a block contains no
+/// proof stamps. The epoch is carried once by [`AnchorSegment`], rather than in
+/// every step, so a segment cannot accidentally mix epochs.
 #[derive(Clone, Copy, Debug, PartialEq, TotalEq)]
-#[expect(
-    variant_size_differences,
-    reason = "a stamp link carries a curve point and an empty link carries \
-              nothing; boxing it would cost an allocation per link and drop Copy"
-)]
-pub enum AnchorLink {
-    /// One stamp absorbed by a block in `epoch`.
-    Stamp {
-        /// The epoch of the block containing the stamp.
-        epoch: EpochIndex,
-        /// The absorbed stamp's tachygram-set commitment.
-        tachygram_set: TachygramSetCommit,
-    },
-    /// One block in `epoch` that absorbs no stamps.
-    Empty {
-        /// The epoch of the empty block.
-        epoch: EpochIndex,
-    },
+pub struct AnchorStep(AnchorStepKind);
+
+#[derive(Clone, Copy, Debug, PartialEq, TotalEq)]
+enum AnchorStepKind {
+    Stamp { tachygram_set: TachygramSetCommit },
+    EmptyBlock,
 }
 
-impl AnchorLink {
-    /// The epoch of the block this link came from.
-    #[must_use]
-    pub const fn epoch(self) -> EpochIndex {
-        match self {
-            Self::Stamp { epoch, .. } | Self::Empty { epoch } => epoch,
+impl AnchorStep {
+    /// Construct a step that absorbs one proof stamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnchorStepError::IdentityTachygramSet`] if `tachygram_set` is
+    /// the identity point, which no real set-polynomial commitment can be.
+    pub fn stamp(tachygram_set: TachygramSetCommit) -> Result<Self, AnchorStepError> {
+        let point: pasta_curves::Eq = tachygram_set.into();
+        if bool::from(point.is_identity()) {
+            return Err(AnchorStepError::IdentityTachygramSet);
         }
+
+        Ok(Self(AnchorStepKind::Stamp { tachygram_set }))
     }
 
-    /// Advance `anchor` across this link, matching what the circuit computes.
-    ///
-    /// Folding [`AnchorLink::advance`] over a link sequence gives the anchor a
-    /// [`ProofStamp::lift`] over that sequence lands on, without proving
-    /// anything — which is how a caller picks the links that reach a target.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a [`AnchorLink::Stamp`] link's `tachygram_set` is the identity
-    /// point. No real stamp produces one: the set polynomial is monic, so its
-    /// commitment is never the identity.
+    /// Construct the single step contributed by a block with no proof stamps.
     #[must_use]
-    pub fn advance(self, anchor: Anchor) -> Anchor {
-        match self {
-            Self::Stamp {
-                epoch,
-                tachygram_set,
-            } => anchor.next_stamp(epoch, &tachygram_set),
-            Self::Empty { epoch } => anchor.next_empty(epoch),
+    pub const fn empty_block() -> Self {
+        Self(AnchorStepKind::EmptyBlock)
+    }
+
+    /// Whether this is an empty-block step.
+    #[must_use]
+    pub const fn is_empty_block(self) -> bool {
+        matches!(self.0, AnchorStepKind::EmptyBlock)
+    }
+
+    /// Advance `anchor` across this step in `epoch`, matching what the circuit
+    /// computes.
+    ///
+    /// Folding this method over a step sequence predicts its endpoint without
+    /// proving. Construction rejects the only input on which
+    /// [`Anchor::next_stamp`] can panic.
+    #[must_use]
+    pub fn advance(self, anchor: Anchor, epoch: EpochIndex) -> Anchor {
+        match self.0 {
+            AnchorStepKind::Stamp { tachygram_set } => anchor.next_stamp(epoch, &tachygram_set),
+            AnchorStepKind::EmptyBlock => anchor.next_empty(epoch),
         }
     }
 }
 
-/// Seeds the one-link [`AnchorChain`] segment that `link` spans, rooted at
+/// Errors constructing a reusable [`AnchorSegment`].
+#[derive(Debug, Display, Error)]
+#[non_exhaustive]
+pub enum AnchorSegmentError {
+    /// A segment had no steps.
+    #[display("anchor segment has no steps")]
+    Empty,
+    /// The supplied steps do not reach the expected endpoint.
+    #[display("anchor segment ends at {actual:?}, expected {expected:?}")]
+    EndMismatch {
+        /// The endpoint supplied by the caller from consensus state.
+        expected: Anchor,
+        /// The endpoint obtained by folding the supplied steps.
+        actual: Anchor,
+    },
+    /// Proving the anchor segment failed.
+    #[display("anchor segment proof failed: {_0}")]
+    Proof(ragu::Error),
+}
+
+/// A reusable proof of an intra-epoch anchor segment.
+///
+/// Constructing the segment separately lets an aggregator reuse its proof for
+/// multiple stamps at the same anchor. Its endpoint is checked against the
+/// caller's consensus-state anchor before any proof work begins.
+#[derive(Clone)]
+pub struct AnchorSegment {
+    epoch: EpochIndex,
+    chain: ragu::Pcd<AnchorChain>,
+}
+
+impl fmt::Debug for AnchorSegment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnchorSegment")
+            .field("epoch", &self.epoch)
+            .field("start", &self.start())
+            .field("end", &self.end())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AnchorSegment {
+    /// Prove that `steps` advance `start` to `expected_end` within `epoch`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnchorSegmentError::Empty`] for an empty segment,
+    /// [`AnchorSegmentError::EndMismatch`] when the host-side fold does not
+    /// reach `expected_end`, or [`AnchorSegmentError::Proof`] if recursive
+    /// proof construction fails.
+    pub fn prove<RNG: RngCore + CryptoRng>(
+        rng: &mut RNG,
+        start: Anchor,
+        epoch: EpochIndex,
+        expected_end: Anchor,
+        steps: &[AnchorStep],
+    ) -> Result<Self, AnchorSegmentError> {
+        let Some((&first, rest)) = steps.split_first() else {
+            return Err(AnchorSegmentError::Empty);
+        };
+
+        let actual = steps
+            .iter()
+            .fold(start, |anchor, step| step.advance(anchor, epoch));
+        if actual != expected_end {
+            return Err(AnchorSegmentError::EndMismatch {
+                expected: expected_end,
+                actual,
+            });
+        }
+
+        let chain = build_anchor_chain(rng, start, epoch, (first, rest))
+            .map_err(AnchorSegmentError::Proof)?;
+
+        Ok(Self { epoch, chain })
+    }
+
+    /// The epoch containing every step in this segment.
+    #[must_use]
+    pub const fn epoch(&self) -> EpochIndex {
+        self.epoch
+    }
+
+    /// The segment's starting anchor.
+    #[must_use]
+    pub fn start(&self) -> Anchor {
+        self.chain.data().0
+    }
+
+    /// The segment's ending anchor.
+    #[must_use]
+    pub fn end(&self) -> Anchor {
+        self.chain.data().1
+    }
+}
+
+/// Seeds the one-step [`AnchorChain`] segment that `step` spans, rooted at
 /// `start`.
-fn seed_anchor_link<RNG: RngCore + CryptoRng>(
+fn seed_anchor_step<RNG: RngCore + CryptoRng>(
     rng: &mut RNG,
     start: Anchor,
-    link: AnchorLink,
+    epoch: EpochIndex,
+    step: AnchorStep,
 ) -> Result<ragu::Pcd<AnchorChain>, ragu::Error> {
-    let (seed, ()) = match link {
-        AnchorLink::Stamp {
-            epoch,
-            tachygram_set,
-        } => PROOF_SYSTEM.seed(rng, AnchorSeed, (start, epoch, tachygram_set))?,
-        AnchorLink::Empty { epoch } => PROOF_SYSTEM.seed(rng, EmptyBlockSeed, (start, epoch))?,
+    let (seed, ()) = match step.0 {
+        AnchorStepKind::Stamp { tachygram_set } => {
+            PROOF_SYSTEM.seed(rng, AnchorSeed, (start, epoch, tachygram_set))?
+        },
+        AnchorStepKind::EmptyBlock => PROOF_SYSTEM.seed(rng, EmptyBlockSeed, (start, epoch))?,
     };
 
     Ok(seed)
 }
 
 /// Builds the [`AnchorChain`] segment rooted at `start` that spans `first`
-/// followed by `rest`, by seeding each link and composing adjacent segments.
+/// followed by `rest`, by seeding each step and composing adjacent segments.
 ///
-/// Taking the first link separately keeps the segment non-empty by
+/// Taking the first step separately keeps the segment non-empty by
 /// construction: [`AnchorChain`] has no identity element to start a fold from.
 fn build_anchor_chain<RNG: RngCore + CryptoRng>(
     rng: &mut RNG,
     start: Anchor,
-    (first, rest): (AnchorLink, &[AnchorLink]),
+    epoch: EpochIndex,
+    (first, rest): (AnchorStep, &[AnchorStep]),
 ) -> Result<ragu::Pcd<AnchorChain>, ragu::Error> {
-    let mut chain = seed_anchor_link(rng, start, first)?;
-    let mut state = first.advance(start);
+    let mut chain = seed_anchor_step(rng, start, epoch, first)?;
 
-    for &link in rest {
-        let seed = seed_anchor_link(rng, state, link)?;
-        state = link.advance(state);
+    for &step in rest {
+        let next_start = chain.data().1;
+        let seed = seed_anchor_step(rng, next_start, epoch, step)?;
 
         let (fused, ()) = PROOF_SYSTEM.fuse(rng, AnchorFuse, (), chain, seed)?;
         chain = fused;
@@ -817,18 +918,18 @@ impl ProofStamp {
         })
     }
 
-    /// Advances this stamp's anchor along `links`, so it can [`merge`] with
-    /// stamps that already sit at the later anchor.
+    /// Advances this stamp's anchor along `segment`, so it can [`merge`] with
+    /// stamps that already sit at the segment's later anchor.
     ///
     /// [`MergeStamp`] constrains both sides to one anchor, but wallets stamp
     /// against whatever anchor was current when they built, and every block
     /// mints a new one. Lifting is what lets an aggregator collect stamps from
     /// different heights into a single merge.
     ///
-    /// `links` is the anchor chain strictly after the stamp's current anchor,
-    /// in block order, up to and including the target — see [`AnchorLink`]. The
-    /// stamp pairs with the descriptors of its covered actions, as it does for
-    /// [`merge`], because the PCD header is reconstructed rather than stored.
+    /// The stamp pairs with the descriptors of its covered actions, as it does
+    /// for [`merge`], because the PCD header is reconstructed rather than
+    /// stored. A segment can be cloned and reused to lift multiple stamps from
+    /// the same anchor.
     ///
     /// Only `anchor` and `proof` change. [`StampLift`] passes the action and
     /// tachygram commitments through untouched, so `coverage`, `tachygrams`,
@@ -837,32 +938,17 @@ impl ProofStamp {
     ///
     /// # Errors
     ///
-    /// Returns [`ProveError::LiftEmptyChain`] if `links` is empty, and
-    /// [`ProveError::LiftAcrossEpochs`] if the links do not all share one
-    /// epoch, since [`AnchorChain`] has no epoch-boundary link.
-    ///
-    /// The caller must also keep the stamp's own anchor inside that epoch,
-    /// which this function cannot check: an anchor is a field element and
-    /// carries no height. Lifting from the last anchor of one epoch skips the
-    /// [`Anchor::next_epoch`] fold the real chain performs, and lands off the
-    /// published sequence — accepted here, rejected later by consensus anchor
-    /// membership.
+    /// Returns [`ProveError::LiftStartMismatch`] if the segment does not start
+    /// at this stamp's anchor. The proof system also verifies the stamp against
+    /// the commitments reconstructed from `descriptors` and the stamp's
+    /// tachygrams.
     ///
     /// [`merge`]: ProofStamp::merge
     pub fn lift<RNG: RngCore + CryptoRng>(
         rng: &mut RNG,
         (stamp, descriptors): (Self, BTreeSet<action::Descriptor>),
-        links: &[AnchorLink],
+        segment: &AnchorSegment,
     ) -> Result<Self, ProveError> {
-        let Some((&first, rest)) = links.split_first() else {
-            return Err(ProveError::LiftEmptyChain);
-        };
-
-        let epoch = first.epoch();
-        if rest.iter().any(|link| link.epoch() != epoch) {
-            return Err(ProveError::LiftAcrossEpochs);
-        }
-
         let Self {
             coverage,
             anchor,
@@ -870,6 +956,14 @@ impl ProofStamp {
             proof,
             ..
         } = stamp;
+
+        let segment_start = segment.start();
+        if segment_start != anchor {
+            return Err(ProveError::LiftStartMismatch {
+                stamp_anchor: anchor,
+                segment_start,
+            });
+        }
 
         let action_commit = descriptors
             .iter()
@@ -880,10 +974,9 @@ impl ProofStamp {
             .collect::<ActionSetPoly>()
             .commit();
 
-        // Recomputed rather than read off the stamp, as `prove_merge` does: the
-        // proof binds the accumulator the circuit witnessed, so a carried
-        // `tachygram_set` disagreeing with `tachygrams` fails the fuse instead
-        // of riding along.
+        // Recomputed rather than trusting the carried cache, as `prove_merge`
+        // does. The proof binds the accumulator the circuit witnessed, so
+        // tachygrams that disagree with the proof fail the fuse.
         let tachygram_commit = tachygrams
             .iter()
             .copied()
@@ -891,11 +984,9 @@ impl ProofStamp {
             .commit();
 
         let stamp_pcd = proof.carry::<StampHeader>((action_commit, tachygram_commit, anchor));
-        let chain =
-            build_anchor_chain(rng, anchor, (first, rest)).map_err(ProveError::LiftFailed)?;
 
         let (pcd, ()) = PROOF_SYSTEM
-            .fuse(rng, StampLift, (), stamp_pcd, chain)
+            .fuse(rng, StampLift, (), stamp_pcd, segment.chain.clone())
             .map_err(ProveError::LiftFailed)?;
         let lifted_anchor = pcd.data().2;
         let rerand = PROOF_SYSTEM

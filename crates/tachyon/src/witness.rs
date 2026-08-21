@@ -17,7 +17,7 @@ use crate::{
     },
     stamp::proof::{
         delegation::NullifierFuse,
-        pool::{AnchorSeed, UnspentEpochFuse, UnspentFuse, UnspentSeed, VerifyUnspent},
+        pool::{AnchorSeed, EndEpochUnspentSeed, UnspentBind, UnspentFuse, UnspentSeed},
         spendable::SpendableInit,
         stamp::MergeStamp,
     },
@@ -62,6 +62,22 @@ pub fn unspent_seed(
     )
 }
 
+/// Prepare the witness for [`EndEpochUnspentSeed`]:
+/// `(anchor_prev, (epoch_prev, nf_prev), nf)`.
+#[must_use]
+pub const fn end_epoch_unspent_seed(
+    (_left, _right): (
+        StepLeft<EndEpochUnspentSeed>,
+        StepRight<EndEpochUnspentSeed>,
+    ),
+    anchor_prev: Anchor,
+    epoch_prev: EpochIndex,
+    nf_prev: Nullifier,
+    nf: Nullifier,
+) -> StepWitness<'static, EndEpochUnspentSeed> {
+    (anchor_prev, (epoch_prev, nf_prev), nf)
+}
+
 /// Prepare the witness for [`UnspentFuse`]:
 /// `(left_elapsed_seq, combined_elapsed_seq, right_elapsed_seq)`.
 #[must_use]
@@ -78,33 +94,16 @@ pub fn unspent_fuse(
     )
 }
 
-/// Prepare the witness for [`UnspentEpochFuse`]:
-/// `(left_elapsed_seq, combined_elapsed_seq, right_elapsed_seq)`.
-#[must_use]
-pub fn unspent_epoch_fuse(
-    (left, _right): (StepLeft<UnspentEpochFuse>, StepRight<UnspentEpochFuse>),
-    left_elapsed: &[Nullifier],
-    right_elapsed: &[Nullifier],
-) -> StepWitness<'static, UnspentEpochFuse> {
-    let (_, _, _, (_, nf_end), _) = left;
-    let combined = [left_elapsed, &[nf_end], right_elapsed].concat();
-    (
-        left_elapsed.iter().copied().collect::<NfSeqPoly>(),
-        combined.into_iter().collect::<NfSeqPoly>(),
-        right_elapsed.iter().copied().collect::<NfSeqPoly>(),
-    )
-}
-
-/// Prepare the witness for [`VerifyUnspent`]: `(elapsed, nf_seq)`.
+/// Prepare the witness for [`UnspentBind`]: `(elapsed, nf_seq)`.
 ///
 /// The range appends the tip `nf_end` from the left
-/// [`Unspent`](crate::stamp::proof::pool::Unspent) header:
+/// [`ArbitraryUnspent`](crate::stamp::proof::pool::ArbitraryUnspent) header:
 /// `nf_seq = elapsed ++ [nf_end]`.
 #[must_use]
-pub fn verify_unspent(
-    (left, _right): (StepLeft<VerifyUnspent>, StepRight<VerifyUnspent>),
+pub fn unspent_bind(
+    (left, _right): (StepLeft<UnspentBind>, StepRight<UnspentBind>),
     elapsed: &[Nullifier],
-) -> StepWitness<'static, VerifyUnspent> {
+) -> StepWitness<'static, UnspentBind> {
     let (_, _, _, (_, nf_end), _) = left;
     let mut nf_seq: Vec<Nullifier> = elapsed.to_vec();
     nf_seq.push(nf_end);
@@ -115,17 +114,16 @@ pub fn verify_unspent(
 }
 
 /// Prepare the witness for [`SpendableInit`]:
-/// `((pre_epoch_anchor, pre_cm_anchor), creation_set, present_nf)`.
+/// `(pre_cm_anchor, creation_set, present_nf)`.
 #[must_use]
 pub fn spendable_init(
     (_left, _right): (StepLeft<SpendableInit>, StepRight<SpendableInit>),
-    pre_epoch_anchor: Anchor,
     pre_cm_anchor: Anchor,
     creation_tgs: &[Tachygram],
     present_nf: Nullifier,
 ) -> StepWitness<'static, SpendableInit> {
     (
-        (pre_epoch_anchor, pre_cm_anchor),
+        pre_cm_anchor,
         creation_tgs.iter().copied().collect::<TachygramSetPoly>(),
         present_nf,
     )

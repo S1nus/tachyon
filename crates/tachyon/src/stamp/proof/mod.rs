@@ -26,13 +26,11 @@ fn make_app() -> Result<Application, ragu::Error> {
         .register(delegation::NullifierStep)?
         .register(delegation::NullifierFuse)?
         .register(pool::AnchorSeed)?
-        .register(pool::EmptyBlockSeed)?
         .register(pool::AnchorFuse)?
         .register(pool::UnspentSeed)?
-        .register(pool::EmptyBlockUnspentSeed)?
+        .register(pool::EndEpochUnspentSeed)?
         .register(pool::UnspentFuse)?
-        .register(pool::UnspentEpochFuse)?
-        .register(pool::VerifyUnspent)?
+        .register(pool::UnspentBind)?
         .register(spendable::SpendableInit)?
         .register(spendable::SpendableLift)?
         .register(output::OutputBind)?

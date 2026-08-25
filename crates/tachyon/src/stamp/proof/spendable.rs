@@ -112,7 +112,9 @@ impl Step for SpendableInit {
         // so the proof certifies the fold of `epoch` and `creation_commit`;
         // consensus membership of the eventual spend anchor binds the rest
         // (see the step doc).
-        let post_cm_anchor = pre_cm_anchor.next_stamp(epoch, &creation_commit);
+        let post_cm_anchor = pre_cm_anchor
+            .next_stamp(epoch, &creation_commit)
+            .map_err(|_e| ragu::Error::InvalidWitness("invalid anchor step".into()))?;
 
         Ok(((cm, (epoch, present_nf), post_cm_anchor), ()))
     }

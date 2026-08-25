@@ -10,8 +10,9 @@ use crate::{
     action,
     constants::EPOCH_SIZE,
     fixtures::{
-        PoolSim, WalletSim, build_autonome, build_output_stamp, forge_overlapping_merge,
-        random_action, random_block, random_block_with, shared_sk, spend_witness,
+        PoolSim, WalletSim, build_anchor_chain_pcd, build_autonome, build_output_stamp,
+        forge_overlapping_merge, random_action, random_block, random_block_with, shared_sk,
+        spend_witness,
     },
     primitives::BlockHeight,
 };
@@ -97,8 +98,12 @@ fn plan_prove_rejects_invalid_inputs() {
     // Empty plan: no actions at all.
     {
         let plan = Plan::new(alloc::vec![], alloc::vec![], anchor);
+
         let err = plan.prove(rng, &user.pak, alloc::vec![]).unwrap_err();
-        assert!(matches!(err, ProveError::NoActions), "expected NoActions");
+        let ProveError::MissingPcd(reason) = err else {
+            panic!("expected MissingPcd, got {err:?}");
+        };
+        assert_eq!(reason.to_string(), "no proof for no planned actions");
     }
 
     let bundle_a = || (range_a.clone(), sp_a.clone());
@@ -108,10 +113,14 @@ fn plan_prove_rejects_invalid_inputs() {
     {
         let plan = Plan::new(two_spends(), alloc::vec![], anchor);
         let pcds = alloc::vec![bundle_a()];
+
         let err = plan.prove(rng, &user.pak, pcds).unwrap_err();
-        assert!(
-            matches!(err, ProveError::SpendableMismatch),
-            "expected SpendableMismatch"
+        let ProveError::MissingPcd(reason) = err else {
+            panic!("expected MissingPcd, got {err:?}");
+        };
+        assert_eq!(
+            reason.to_string(),
+            "cannot prove 2 spend actions with 1 spendbind inputs"
         );
     }
 
@@ -119,10 +128,14 @@ fn plan_prove_rejects_invalid_inputs() {
     {
         let plan = Plan::new(two_spends(), alloc::vec![], anchor);
         let pcds = alloc::vec![bundle_a(), bundle_b(), bundle_a()];
+
         let err = plan.prove(rng, &user.pak, pcds).unwrap_err();
-        assert!(
-            matches!(err, ProveError::SpendableMismatch),
-            "expected SpendableMismatch"
+        let ProveError::MissingPcd(reason) = err else {
+            panic!("expected MissingPcd, got {err:?}");
+        };
+        assert_eq!(
+            reason.to_string(),
+            "cannot prove 2 spend actions with 3 spendbind inputs"
         );
     }
 
@@ -134,11 +147,11 @@ fn plan_prove_rejects_invalid_inputs() {
         let plan = Plan::new(two_spends(), alloc::vec![], anchor);
         let pcds = alloc::vec![bundle_b(), bundle_a()];
         let err = plan.prove(rng, &user.pak, pcds).unwrap_err();
-        let ProveError::ProofFailed(ragu::Error::InvalidWitness(inner)) = err else {
+        let ProveError::ProofFailed(ragu::Error::InvalidWitness(reason)) = err else {
             panic!("expected ProofFailed(InvalidWitness), got {err:?}");
         };
         assert_eq!(
-            inner.to_string(),
+            reason.to_string(),
             "SpendStamp: note does not match the spend"
         );
     }
@@ -211,8 +224,8 @@ fn double_output_cannot_aggregate() {
             (stamp_b.clone(), descriptors_b.clone()),
         )
         .expect_err("overlapping tachygrams must not merge");
-        let ProveError::MergeFailed(ragu::Error::InvalidWitness(inner)) = merge_err else {
-            panic!("expected MergeFailed(InvalidWitness), got {merge_err:?}");
+        let ProveError::ProofFailed(ragu::Error::InvalidWitness(inner)) = merge_err else {
+            panic!("expected ProofFailed(InvalidWitness), got {merge_err:?}");
         };
         assert_eq!(
             inner.to_string(),
@@ -338,8 +351,8 @@ fn double_spend_cannot_aggregate() {
             (stamp_b.clone(), descriptors_b.clone()),
         )
         .expect_err("shared nullifiers must not merge");
-        let ProveError::MergeFailed(ragu::Error::InvalidWitness(inner)) = merge_err else {
-            panic!("expected MergeFailed(InvalidWitness), got {merge_err:?}");
+        let ProveError::ProofFailed(ragu::Error::InvalidWitness(inner)) = merge_err else {
+            panic!("expected ProofFailed(InvalidWitness), got {merge_err:?}");
         };
         assert_eq!(
             inner.to_string(),
@@ -422,8 +435,8 @@ fn cannot_forge_stamp_covering_duplicated_action() {
             (output_stamp.clone(), descriptors.clone()),
         )
         .expect_err("a duplicated action must not merge");
-        let ProveError::MergeFailed(ragu::Error::InvalidWitness(inner)) = merge_err else {
-            panic!("expected MergeFailed(InvalidWitness), got {merge_err:?}");
+        let ProveError::ProofFailed(ragu::Error::InvalidWitness(inner)) = merge_err else {
+            panic!("expected ProofFailed(InvalidWitness), got {merge_err:?}");
         };
         assert_eq!(
             inner.to_string(),
@@ -603,18 +616,34 @@ fn verify_proof_action_multiset_invariants() {
 /// even though the sequence is non-decreasing.
 #[test]
 fn read_rejects_duplicate_tachygrams() {
-    let tg = Tachygram::from(Fp::ONE);
+    let rng = &mut StdRng::seed_from_u64(0);
+
+    let anchor = Anchor(Fp::random(&mut *rng));
+    let tg = Tachygram::random(&mut *rng);
+    let tg_set = [tg, tg];
 
     let mut buf = Vec::new();
-    buf.extend_from_slice(&[0u8; 32]); // covered actions digest
-    Anchor(Fp::ZERO).write(&mut buf).expect("write anchor");
-    TachygramSetPoly::from_iter([tg])
-        .commit()
-        .write(&mut buf)
+    {
+        buf.extend_from_slice(&[0u8; 32]); // dummy actions digest
+        anchor.write(&mut buf).expect("write anchor");
+        serialization::write_eq_affine(
+            &mut buf,
+            &TachygramSetPoly::from_iter(tg_set)
+                .commit()
+                .as_ref()
+                .to_affine(),
+        )
         .expect("write tachygram set commitment");
-    serialization::write_compactsize(&mut buf, 2).expect("write tachygram count");
-    serialization::write_fp(&mut buf, &Fp::from(tg)).expect("write tachygram");
-    serialization::write_fp(&mut buf, &Fp::from(tg)).expect("write tachygram");
+
+        serialization::write_compactsize(
+            &mut buf,
+            tg_set.len().try_into().expect("tachygram count"),
+        )
+        .expect("write tachygram count");
+        for write_tg in tg_set {
+            serialization::write_fp(&mut buf, &write_tg.into()).expect("write tachygram");
+        }
+    }
 
     let err = ProofStamp::read(&*buf).expect_err("duplicate tachygrams must be rejected");
     assert_eq!(err.to_string(), "tachygrams are not unique");
@@ -690,4 +719,188 @@ fn accumulating_rejects_mismatched_commitment() {
             .expect("verify"),
         "verification must reject an unconfirmed commitment"
     );
+}
+
+/// A lift moves the anchor to the segment's end and leaves the stamp's
+/// published data alone.
+#[test]
+fn lift_advances_a_stamp_anchor() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let wallet = WalletSim::random(rng);
+    let mut pool = PoolSim::genesis(rng);
+
+    pool.advance(3, |_| random_block(rng, 1, 4));
+    let note = wallet.random_note(200);
+    let (stamp, _plan) = build_output_stamp(rng, pool.anchor(), note);
+    let stamped_at = pool.height();
+
+    pool.advance(2, |_| random_block(rng, 1, 4));
+    let lifted_to = pool.height();
+    let chain = build_anchor_chain_pcd(rng, &pool, stamped_at.next().expect("next")..=lifted_to);
+
+    let before = stamp.clone();
+    let lifted = stamp
+        .prove_lift(rng, [], chain)
+        .expect("lift over a within-epoch segment");
+
+    assert_eq!(lifted.anchor, pool.anchor_at(lifted_to));
+    assert_eq!(lifted.coverage, before.coverage);
+    assert_eq!(lifted.tachygram_set, before.tachygram_set);
+    assert_eq!(lifted.tachygrams, before.tachygrams);
+}
+
+/// The header the lift rebuilds is the one the original proof was made
+/// against, so the lifted stamp still verifies against its covered actions.
+#[test]
+fn lift_then_verify() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let wallet = WalletSim::random(rng);
+    let mut pool = PoolSim::genesis(rng);
+
+    pool.advance(3, |_| random_block(rng, 1, 4));
+    let note = wallet.random_note(200);
+    let (stamp, plan) = build_output_stamp(rng, pool.anchor(), note);
+    let stamped_at = pool.height();
+    let digest = plan.digest().expect("valid plan");
+
+    pool.advance(2, |_| random_block(rng, 1, 4));
+    let chain =
+        build_anchor_chain_pcd(rng, &pool, stamped_at.next().expect("next")..=pool.height());
+
+    let lifted = stamp.prove_lift(rng, [digest], chain).expect("lift");
+
+    assert!(
+        lifted.verify_proof(rng, [digest]).expect("verify"),
+        "a lifted stamp must verify against the actions it covers"
+    );
+}
+
+/// A stamp covers the actions of the plan it was proven for, so lifting it
+/// over their descriptors reaches the same action set the digest-taking core
+/// is given directly, and the result verifies against their digests.
+#[test]
+fn lift_over_descriptors_then_verify() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let wallet = WalletSim::random(rng);
+    let mut pool = PoolSim::genesis(rng);
+
+    pool.advance(3, |_| random_block(rng, 1, 4));
+    let note = wallet.random_note(200);
+    let (stamp, covered_plan) = build_output_stamp(rng, pool.anchor(), note);
+    let covered_descriptors = BTreeSet::from_iter([covered_plan.descriptor()]);
+    let stamped_at = pool.height();
+
+    // The stamps published after this one, each paired with the anchor it
+    // absorbs into, which is what an `AnchorSeed` witnesses.
+    pool.advance(2, |_| random_block(rng, 1, 4));
+    let epoch = pool.height().epoch();
+    let following_stamps = (stamped_at.0 + 1..=pool.height().0)
+        .flat_map(|height| pool.stamp_commits_at(BlockHeight(height)))
+        .scan(stamp.anchor, |anchor_before, tachygram_set| {
+            let witness = (*anchor_before, epoch, tachygram_set);
+            *anchor_before = anchor_before.next_stamp(epoch, &tachygram_set).unwrap();
+            Some(witness)
+        })
+        .collect();
+
+    let lifted = stamp
+        .lift(rng, &covered_descriptors, following_stamps)
+        .expect("lift over the covered descriptors");
+
+    assert!(
+        lifted
+            .verify_proof(rng, [covered_plan.digest().expect("valid plan")])
+            .expect("verify"),
+        "a lifted stamp must verify against the actions it covers"
+    );
+}
+
+/// A segment from an unrelated chain does not root at the stamp's anchor.
+#[test]
+fn lift_rejects_a_foreign_chain() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let wallet = WalletSim::random(rng);
+    let mut pool = PoolSim::genesis(rng);
+    pool.advance(3, |_| random_block(rng, 1, 4));
+
+    let note = wallet.random_note(200);
+    let (stamp, _plan) = build_output_stamp(rng, pool.anchor(), note);
+
+    let mut foreign = PoolSim::genesis(rng);
+    foreign.advance(3, |_| random_block(rng, 1, 4));
+    let chain = build_anchor_chain_pcd(rng, &foreign, BlockHeight(1)..=foreign.height());
+
+    stamp
+        .prove_lift(rng, [], chain)
+        .expect_err("a segment from another chain must not lift a stamp");
+}
+
+/// A lift takes the caller's word for the covered action set, so a wrong
+/// digest list is caught at verification rather than at prove time.
+#[test]
+fn lift_rejects_wrong_digests() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let wallet = WalletSim::random(rng);
+    let mut pool = PoolSim::genesis(rng);
+
+    pool.advance(3, |_| random_block(rng, 1, 4));
+    let note = wallet.random_note(200);
+    let (stamp, plan) = build_output_stamp(rng, pool.anchor(), note);
+    let stamped_at = pool.height();
+    let digest = plan.digest().expect("valid plan");
+    let foreign_digest = random_action(rng).digest().expect("valid action");
+
+    pool.advance(2, |_| random_block(rng, 1, 4));
+    let chain =
+        build_anchor_chain_pcd(rng, &pool, stamped_at.next().expect("next")..=pool.height());
+
+    let lifted = stamp
+        .prove_lift(rng, [foreign_digest], chain)
+        .expect("the lift itself cannot see the wrong action set");
+
+    assert!(
+        !lifted.verify_proof(rng, [digest]).expect("verify"),
+        "a stamp lifted under a forged action set must not verify"
+    );
+}
+
+/// Stamps taken at different anchors cannot merge until one is lifted onto
+/// the other's anchor.
+#[test]
+fn merge_after_lift() {
+    let rng = &mut StdRng::seed_from_u64(0);
+    let user_a = WalletSim::random(rng);
+    let user_b = WalletSim::random(rng);
+    let mut pool = PoolSim::genesis(rng);
+
+    pool.advance(3, |_| random_block(rng, 1, 4));
+    let note_a = user_a.random_note(200);
+    let (stamp_a, plan_a) = build_output_stamp(rng, pool.anchor(), note_a);
+    let height_a = pool.height();
+
+    pool.advance(3, |_| random_block(rng, 1, 4));
+    let note_b = user_b.random_note(300);
+    let (stamp_b, plan_b) = build_output_stamp(rng, pool.anchor(), note_b);
+    let height_b = pool.height();
+
+    let (desc_a, desc_b) = (
+        BTreeSet::from_iter([plan_a.descriptor()]),
+        BTreeSet::from_iter([plan_b.descriptor()]),
+    );
+
+    ProofStamp::merge(
+        rng,
+        (stamp_a.clone(), desc_a.clone()),
+        (stamp_b.clone(), desc_b.clone()),
+    )
+    .expect_err("mismatched anchors must not merge");
+
+    let chain = build_anchor_chain_pcd(rng, &pool, height_a.next().expect("next")..=height_b);
+    let lifted_a = stamp_a
+        .prove_lift(rng, [plan_a.digest().expect("valid plan")], chain)
+        .expect("lift onto the later anchor");
+
+    assert_eq!(lifted_a.anchor, stamp_b.anchor);
+    ProofStamp::merge(rng, (lifted_a, desc_a), (stamp_b, desc_b))
+        .expect("a lifted stamp merges with one at the anchor it was lifted to");
 }

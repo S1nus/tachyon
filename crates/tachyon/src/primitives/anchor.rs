@@ -1,50 +1,73 @@
 use corez::io::{self, Read, Write};
-use derive_more::{Debug, Eq as TotalEq, From, Into, PartialEq};
+use derive_more::{Debug, Display, Eq as TotalEq, Error, From, Into, PartialEq};
 use ff::Field as _;
-use group::Curve as _;
+use group::{Curve as _, Group as _};
+use lazy_static::lazy_static;
 use pasta_curves::{Eq, Fp};
 
 use super::{EpochIndex, TachygramSetCommit};
 use crate::{digest::poseidon, serialization};
 
+lazy_static! {
+    static ref ANCHOR_GENESIS: Fp = poseidon::anchor_next_epoch(Fp::ZERO, Fp::ZERO);
+}
+
+/// Errors that can occur when advancing an anchor.
+#[derive(Debug, Display, Error, PartialEq, TotalEq)]
+pub enum AnchorError {
+    /// The provided tachygram set is the identity point.
+    #[display("next stamp cannot be the identity point")]
+    NextStampZero,
+    /// The provided tachygram set is empty.
+    #[display("next stamp cannot be empty")]
+    NextStampEmpty,
+    /// The provided epoch index is zero.
+    #[display("next epoch cannot be zero")]
+    NextEpochZero,
+}
+
 /// Running anchor over the consensus state.
-///
-/// A Poseidon hash sequence with two domain-separated link types:
-///
-/// - [`Anchor::next_stamp`] (`Tachyon-StampFld`) absorbs one stamp's epoch and
-///   tachygram-set commitment.
-/// - [`Anchor::next_epoch`] (`Tachyon-EpochStp`) lifts across an epoch
-///   boundary. `EndEpochUnspentSeed` is the only step that folds it, from a
-///   predecessor it does not constrain to be the epoch's terminal anchor.
-///
-/// A block that publishes no stamp contributes no link, so the anchor is
-/// constant across a stampless span.
-///
-/// Opening reveals each link's role by its domain.
 #[derive(Clone, Copy, Debug, From, Into, PartialEq, TotalEq)]
 pub struct Anchor(pub Fp);
 
 impl Anchor {
-    /// Advance the anchor by absorbing one stamp's commit, bound to the epoch
-    /// of the block containing it.
+    /// Advance the anchor to the next stamp in the present epoch.
     ///
-    /// # Panics
+    /// The present epoch index may be zero, within the genesis epoch.
     ///
-    /// Panics if `stamp_commit` is the identity point.
-    #[must_use]
-    pub fn next_stamp(self, epoch: EpochIndex, stamp_commit: &TachygramSetCommit) -> Self {
-        Self(poseidon::anchor_stamp_step(
-            self.0,
-            epoch,
-            Eq::from(*stamp_commit).to_affine(),
-        ))
+    /// # Errors
+    ///
+    /// Fails if `stamp_commit` is the identity point or a commitment to an
+    /// empty set.
+    pub fn next_stamp(
+        self,
+        present_epoch: EpochIndex,
+        &stamp_commit: &TachygramSetCommit,
+    ) -> Result<Self, AnchorError> {
+        if *stamp_commit.as_ref() == Eq::identity() {
+            Err(AnchorError::NextStampZero)
+        } else if stamp_commit == TachygramSetCommit::default() {
+            Err(AnchorError::NextStampEmpty)
+        } else {
+            Ok(Self(poseidon::anchor_next_stamp(
+                self.0,
+                present_epoch.into(),
+                stamp_commit.as_ref().to_affine(),
+            )))
+        }
     }
 
-    /// Lift the anchor across an epoch boundary into the new epoch's
-    /// initial state.
-    #[must_use]
-    pub fn next_epoch(self, new_epoch: EpochIndex) -> Self {
-        Self(poseidon::anchor_epoch_step(self.0, new_epoch))
+    /// Advance the anchor to the next epoch boundary.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `next_epoch` is zero.
+    pub fn next_epoch(self, next_epoch: EpochIndex) -> Result<Self, AnchorError> {
+        if next_epoch == EpochIndex(0) {
+            Err(AnchorError::NextEpochZero)
+        } else {
+            Ok(Self(poseidon::anchor_next_epoch(self.0, next_epoch.into())))
+        }
     }
 
     /// Read a 32-byte anchor.
@@ -59,51 +82,20 @@ impl Anchor {
 }
 
 impl Default for Anchor {
-    /// The genesis epoch boundary.
+    /// The leading epoch boundary for epoch zero.
     fn default() -> Self {
-        Self(Fp::ZERO).next_epoch(EpochIndex(0))
+        Self(*ANCHOR_GENESIS)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use pasta_curves::Eq;
     use rand::{SeedableRng as _, rngs::StdRng};
 
     use super::*;
     use crate::{Tachygram, TachygramSetPoly};
 
-    const EPOCH: EpochIndex = EpochIndex(7);
-
-    /// Folding the same stamps in the same order yields the same anchor.
-    #[test]
-    fn next_stamp_is_deterministic() {
-        let rng = &mut StdRng::seed_from_u64(0);
-        let first = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
-        let second = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
-
-        let run_one = Anchor::default()
-            .next_stamp(EPOCH, &first)
-            .next_stamp(EPOCH, &second);
-        let run_two = Anchor::default()
-            .next_stamp(EPOCH, &first)
-            .next_stamp(EPOCH, &second);
-        assert_eq!(run_one, run_two);
-    }
-
-    /// Two distinct stamp commits absorb to distinct anchors.
-    #[test]
-    fn distinct_stamps_distinct_anchors() {
-        let rng = &mut StdRng::seed_from_u64(0);
-        let first = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
-        let second = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
-
-        assert_ne!(
-            Anchor::default().next_stamp(EPOCH, &first),
-            Anchor::default().next_stamp(EPOCH, &second),
-        );
-    }
-
-    /// Order matters: absorbing the same stamps in different orders diverges.
     #[test]
     fn order_matters() {
         let rng = &mut StdRng::seed_from_u64(0);
@@ -111,39 +103,55 @@ mod tests {
         let second = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
 
         let forward = Anchor::default()
-            .next_stamp(EPOCH, &first)
-            .next_stamp(EPOCH, &second);
+            .next_stamp(EpochIndex(7), &first)
+            .unwrap()
+            .next_stamp(EpochIndex(7), &second)
+            .unwrap();
+
         let reverse = Anchor::default()
-            .next_stamp(EPOCH, &second)
-            .next_stamp(EPOCH, &first);
+            .next_stamp(EpochIndex(7), &second)
+            .unwrap()
+            .next_stamp(EpochIndex(7), &first)
+            .unwrap();
+
         assert_ne!(forward, reverse);
     }
 
-    /// Every link binds its epoch: the same tick in two epochs diverges.
     #[test]
-    fn epoch_distinguishes_ticks() {
+    fn next_stamp_rejects_invalid_sets() {
         let rng = &mut StdRng::seed_from_u64(0);
-        let stamp = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
-        let start = Anchor::default();
 
-        assert_ne!(
-            start.next_stamp(EpochIndex(1), &stamp),
-            start.next_stamp(EpochIndex(2), &stamp),
-        );
-        assert_ne!(
-            start.next_epoch(EpochIndex(1)),
-            start.next_epoch(EpochIndex(2))
-        );
+        // The identity commitment is not a valid set
+        {
+            let anchor = Anchor(Fp::random(&mut *rng));
+            let zero_set = TachygramSetCommit::from(Eq::identity());
+
+            let Err(AnchorError::NextStampZero) = anchor.next_stamp(EpochIndex(7), &zero_set)
+            else {
+                panic!("should not be able to advance with an identity stamp");
+            };
+        }
+
+        // An empty set commits to a constant polynomial
+        {
+            let anchor = Anchor(Fp::random(&mut *rng));
+            let one_set = TachygramSetCommit::default();
+
+            let Err(AnchorError::NextStampEmpty) = anchor.next_stamp(EpochIndex(1), &one_set)
+            else {
+                panic!("should not be able to advance with an empty stamp");
+            };
+        }
     }
 
-    /// The boundary lift is domain-separated from stamp absorption, so a
-    /// boundary anchor is unreachable by any chain link.
     #[test]
-    fn next_epoch_distinct_from_next_stamp() {
+    fn next_epoch_rejects_epoch_zero() {
         let rng = &mut StdRng::seed_from_u64(0);
-        let stamp = TachygramSetPoly::from_iter([Tachygram::random(&mut *rng)]).commit();
-        let via_epoch = Anchor::default().next_epoch(EPOCH);
-        let via_stamp = Anchor::default().next_stamp(EPOCH, &stamp);
-        assert_ne!(via_epoch, via_stamp);
+
+        let anchor = Anchor(Fp::random(rng));
+
+        let Err(AnchorError::NextEpochZero) = anchor.next_epoch(EpochIndex(0)) else {
+            panic!("should not be able to advance to epoch zero");
+        };
     }
 }

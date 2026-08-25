@@ -2,40 +2,33 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use corez::io::{self, Read, Write};
 use derive_more::{AsRef, Debug, Eq as TotalEq, From, Into, PartialEq};
-use group::{Curve as _, GroupEncoding as _};
 use pasta_curves::{Eq, Fp};
 use ragu::{Polynomial, poly_with_roots};
 
 use super::{ActionDigest, Tachygram};
-use crate::serialization;
 
 /// Pedersen commitment to a stamp's tachygram set.
-#[derive(Clone, Copy, Debug, From, Into, PartialEq, TotalEq)]
+#[derive(AsRef, Clone, Copy, Debug, From, Into, PartialEq, TotalEq)]
 pub struct TachygramSetCommit(Eq);
 
-impl TachygramSetCommit {
-    /// The 32-byte compressed encoding.
-    #[must_use]
-    pub fn to_bytes(&self) -> [u8; 32] {
-        self.0.to_affine().to_bytes()
-    }
-
-    /// Read a 32-byte compressed commitment.
-    pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
-        serialization::read_eq_affine(&mut reader).map(|point| Self(point.into()))
-    }
-
-    /// Write a 32-byte compressed commitment.
-    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        serialization::write_eq_affine(&mut writer, &self.0.to_affine())
+impl Default for TachygramSetCommit {
+    /// A commitment to an empty set.
+    fn default() -> Self {
+        Self(Polynomial::from_coeffs(poly_with_roots(&[])).commit())
     }
 }
 
 /// Pedersen commitment to a stamp's action-digest set.
-#[derive(Clone, Copy, Debug, From, Into, PartialEq, TotalEq)]
+#[derive(AsRef, Clone, Copy, Debug, From, Into, PartialEq, TotalEq)]
 pub struct ActionSetCommit(Eq);
+
+impl Default for ActionSetCommit {
+    /// A commitment to an empty set.
+    fn default() -> Self {
+        Self(Polynomial::from_coeffs(poly_with_roots(&[])).commit())
+    }
+}
 
 /// Witness polynomial for a stamp's tachygram set (members encoded as roots).
 #[derive(AsRef, Clone, Debug, Into)]

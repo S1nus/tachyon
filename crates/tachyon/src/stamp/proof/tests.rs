@@ -201,10 +201,12 @@ fn unspent_fuse_rejects_invalid_compositions() {
     let stamps_left = vec![Tachygram::random(&mut *rng)];
     let stamps_right = vec![Tachygram::random(&mut *rng)];
     let start = Anchor::default();
-    let mid = start.next_stamp(
-        EpochIndex(0),
-        &TachygramSetPoly::from_iter(stamps_left.clone()).commit(),
-    );
+    let mid = start
+        .next_stamp(
+            EpochIndex(0),
+            &TachygramSetPoly::from_iter(stamps_left.clone()).commit(),
+        )
+        .unwrap();
 
     // nf mismatch: contiguous states but different nfs.
     {
@@ -813,17 +815,24 @@ fn multi_epoch_fuse_setup(
     let start_height = BlockHeight(2);
     let junction_height = BlockHeight(2 * EPOCH_SIZE + 2);
     let end_height = BlockHeight(3 * EPOCH_SIZE + 2);
-    let start = pool.prev_anchor_at(start_height).next_stamp(
-        start_height.epoch(),
-        &pool.stamp_commits_at(start_height)[0],
-    );
-    let junction = pool.prev_anchor_at(junction_height).next_stamp(
-        junction_height.epoch(),
-        &pool.stamp_commits_at(junction_height)[0],
-    );
+    let start = pool
+        .prev_anchor_at(start_height)
+        .next_stamp(
+            start_height.epoch(),
+            &pool.stamp_commits_at(start_height)[0],
+        )
+        .unwrap();
+    let junction = pool
+        .prev_anchor_at(junction_height)
+        .next_stamp(
+            junction_height.epoch(),
+            &pool.stamp_commits_at(junction_height)[0],
+        )
+        .unwrap();
     let end = pool
         .prev_anchor_at(end_height)
-        .next_stamp(end_height.epoch(), &pool.stamp_commits_at(end_height)[0]);
+        .next_stamp(end_height.epoch(), &pool.stamp_commits_at(end_height)[0])
+        .unwrap();
     let left = build_unspent_pcd_between_anchors(rng, &pool, &[nf0, nf1, nf2], (start, junction));
     let right = build_unspent_pcd_between_anchors(rng, &pool, &[nf2, nf3], (junction, end));
     assert_eq!(left.data().0, start, "left rooted at the sub-block start");
@@ -1009,13 +1018,17 @@ fn epoch_fuse_setup(
     let nf: [Nullifier; 5] = array::from_fn(|_| Nullifier::from(Fp::random(&mut *rng)));
     let start_height = BlockHeight(2);
     let end_height = BlockHeight(4 * EPOCH_SIZE + 2);
-    let start = pool.prev_anchor_at(start_height).next_stamp(
-        start_height.epoch(),
-        &pool.stamp_commits_at(start_height)[0],
-    );
+    let start = pool
+        .prev_anchor_at(start_height)
+        .next_stamp(
+            start_height.epoch(),
+            &pool.stamp_commits_at(start_height)[0],
+        )
+        .unwrap();
     let end = pool
         .prev_anchor_at(end_height)
-        .next_stamp(end_height.epoch(), &pool.stamp_commits_at(end_height)[0]);
+        .next_stamp(end_height.epoch(), &pool.stamp_commits_at(end_height)[0])
+        .unwrap();
     let left = build_unspent_pcd_between_anchors(
         rng,
         &pool,
@@ -1108,7 +1121,7 @@ fn end_epoch_unspent_seed_spans_one_boundary_link() {
     assert_eq!(anchor_prev, epoch_tip);
     assert_eq!(
         anchor_last,
-        epoch_tip.next_epoch(EpochIndex(5)),
+        epoch_tip.next_epoch(EpochIndex(5)).unwrap(),
         "the segment covers the boundary tick"
     );
     assert_eq!(epoch_start, EpochIndex(4));
@@ -1178,7 +1191,7 @@ fn spendable_lift_advances_from_an_epoch_tip() {
         (
             note.commitment(),
             (EpochIndex(1), user.nf_at(&note, EpochIndex(1))),
-            epoch0_tip.next_epoch(EpochIndex(1))
+            epoch0_tip.next_epoch(EpochIndex(1)).unwrap()
         ),
         "the tick advances epoch, nullifier and anchor together"
     );
@@ -1312,7 +1325,8 @@ fn unspent_span_ending_on_a_boundary_anchor() {
     assert_eq!(
         pool.anchor_at(target_height),
         pool.pre_epoch_anchor(EpochIndex(1))
-            .next_epoch(EpochIndex(1)),
+            .next_epoch(EpochIndex(1))
+            .unwrap(),
         "a silent epoch-first block rests on the boundary anchor"
     );
 

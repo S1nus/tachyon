@@ -328,7 +328,7 @@ impl PoolSimBlock {
         let commits = self.commits();
         let anchors = commits.iter().fold(Vec::new(), |mut acc, commit| {
             let last = acc.last().unwrap_or(&self.prev);
-            acc.push(last.next_stamp(epoch, commit));
+            acc.push(last.next_stamp(epoch, commit).unwrap());
             acc
         });
         BlockDigest { commits, anchors }
@@ -568,13 +568,23 @@ impl PoolSim {
         }
     }
 
+    /// Mine a block publishing the stamps of `bundles`, in order.
+    pub fn mine_bundles(&mut self, bundles: &[&Bundle<ProofStamp>]) {
+        self.mine(
+            bundles
+                .iter()
+                .map(|&bundle| bundle.stamp.tachygrams.iter().copied().collect())
+                .collect(),
+        );
+    }
+
     pub fn mine(&mut self, stamps: Vec<Vec<Tachygram>>) {
         let new_height = BlockHeight::from(self.history.len());
         let old_tip = self.anchor();
         // Epoch-first blocks are preceded by a boundary anchor lift;
         // intra-epoch blocks advance directly from the previous tip.
         let prev = if new_height.is_epoch_first() {
-            old_tip.next_epoch(new_height.epoch())
+            old_tip.next_epoch(new_height.epoch()).unwrap()
         } else {
             old_tip
         };
@@ -604,7 +614,7 @@ pub(crate) fn build_anchor_chain_pcd(
     loop {
         for tgs in &pool.tachygrams_at(height) {
             let witness = witness::anchor_seed(((), ()), state, height.epoch(), tgs);
-            let next_state = state.next_stamp(witness.1, &witness.2);
+            let next_state = state.next_stamp(witness.1, &witness.2).unwrap();
             let (seed, ()) = PROOF_SYSTEM
                 .seed(rng, pool::AnchorSeed, witness)
                 .expect("AnchorSeed");
@@ -721,7 +731,7 @@ pub(crate) fn build_unspent_pcd_between_anchors(
                         )
                         .expect("UnspentSeed");
                     leaves.push(seed);
-                    entry = entry.next_stamp(epoch, &commit);
+                    entry = entry.next_stamp(epoch, &commit).unwrap();
                 }
             },
             // The marker denotes the crossing *into* `epoch`, so the segment
@@ -926,7 +936,7 @@ impl WalletSim {
             let pre_cm_anchor = stamp_commits[..cm_idx]
                 .iter()
                 .fold(pool.prev_anchor_at(init_height), |anchor, commit| {
-                    anchor.next_stamp(init_height.epoch(), commit)
+                    anchor.next_stamp(init_height.epoch(), commit).unwrap()
                 });
 
             (pre_cm_anchor, stamps[cm_idx].clone())

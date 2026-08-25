@@ -66,8 +66,8 @@ These are all Tachyon-specific digests, performed in-circuit.
 | Output padding tachygram | `Tachyon-PadDeriv` |
 | Action digest | `Tachyon-ActionDg` |
 | Payment key derivation | `Tachyon-PkDerive` |
-| Anchor stamp step | `Tachyon-StampFld` |
-| Anchor epoch step | `Tachyon-EpochStp` |
+| Anchor stamp step | `Tachyon-AnchorSt` |
+| Anchor epoch step | `Tachyon-AnchorEp` |
 
 ## Hash-to-curve
 

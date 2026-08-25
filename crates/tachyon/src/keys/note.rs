@@ -79,7 +79,7 @@ impl NullifierKey {
 /// note commitment. It is NOT an on-chain address; payment coordination
 /// happens out-of-band via higher-level protocols (ZIP 321 payment
 /// requests, ZIP 324 URI encapsulated payments).
-#[derive(Clone, Copy, Debug, AsRef, From, Into)]
+#[derive(AsRef, Clone, Copy, Debug, From, Into)]
 pub struct PaymentKey(#[debug(skip)] Fp);
 
 impl PaymentKey {

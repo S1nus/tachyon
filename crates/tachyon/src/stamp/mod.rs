@@ -6,15 +6,17 @@ extern crate alloc;
 
 pub mod proof;
 
-use alloc::{boxed::Box, collections::BTreeSet, vec, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeSet, format, vec, vec::Vec};
+use core::error;
 
 use corez::io::{self, Read, Write};
 use derive_more::{Debug, Display, Eq as TotalEq, Error, Into, PartialEq};
 use ff::PrimeField as _;
-use pasta_curves::Fp;
+use group::{Curve as _, GroupEncoding as _};
+use pasta_curves::{Eq, Fp};
 use proof::{
     PROOF_SYSTEM, output,
-    stamp::{MergeStamp, OutputStamp, SpendStamp, StampHeader},
+    stamp::{MergeStamp, OutputStamp, SpendStamp, StampHeader, StampLift},
 };
 use ragu::{self, proof::PROOF_SIZE_COMPRESSED};
 use rand_core::{CryptoRng, RngCore};
@@ -26,9 +28,11 @@ use crate::{
     effect,
     entropy::ActionRandomizer,
     keys::ProofAuthorizingKey,
-    primitives::{ActionDigest, ActionDigestError, Anchor, Tachygram, TachygramSetCommit},
+    primitives::{
+        ActionDigest, ActionDigestError, Anchor, EpochIndex, Tachygram, TachygramSetCommit,
+    },
     serialization,
-    stamp::proof::{delegation, spend, spendable},
+    stamp::proof::{delegation, pool, spend, spendable},
     value,
 };
 
@@ -169,7 +173,7 @@ impl StampState for ProofStamp {
             blake2b::stamp_data_digest(
                 blake2b::stamp_proof_digest(proof.as_ref()),
                 anchor,
-                self.tachygram_set.to_bytes(),
+                self.tachygram_set.as_ref().to_affine().to_bytes(),
                 &tachygrams,
             )
         };
@@ -196,7 +200,8 @@ impl StampState for ProofStamp {
         // Parsing does not confirm this against the tachygrams below: an MSM
         // over attacker-supplied bytes is a denial-of-service vector. See
         // `ProofStamp::is_accumulating`.
-        let tachygram_set = TachygramSetCommit::read(&mut reader)?;
+        let tachygram_set =
+            TachygramSetCommit::from(Eq::from(serialization::read_eq_affine(&mut reader)?));
 
         // `n_tachygrams` is attacker-controlled up to MAX_COMPACT_SIZE (2^25), so
         // do not pre-allocate vector capacity. vector reads are ASSUMED to hit
@@ -252,7 +257,7 @@ impl StampState for ProofStamp {
     fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         writer.write_all(&self.coverage)?;
         self.anchor.write(&mut writer)?;
-        self.tachygram_set.write(&mut writer)?;
+        serialization::write_eq_affine(&mut writer, &self.tachygram_set.as_ref().to_affine())?;
         serialization::write_compactsize(
             &mut writer,
             u64::try_from(self.tachygrams.len()).map_err(|_err| {
@@ -352,7 +357,14 @@ impl Plan {
         let mut entries = Vec::with_capacity(self.spends.len() + self.outputs.len());
 
         if self.spends.len() != spendbind_inputs.len() {
-            return Err(ProveError::SpendableMismatch);
+            return Err(ProveError::MissingPcd(
+                format!(
+                    "cannot prove {} spend actions with {} spendbind inputs",
+                    self.spends.len(),
+                    spendbind_inputs.len(),
+                )
+                .into(),
+            ));
         }
 
         for ((desc, alpha, note, rcv), (nf_pcd, spendable_pcd)) in
@@ -396,7 +408,7 @@ impl Plan {
 
         let (descriptors, _digests, tachygrams, anchor, proof) = entries
             .into_iter()
-            .map(Ok::<_, ProveError>)
+            .map(Ok)
             .reduce(|acc, next| {
                 let (left_desc, left_digests, left_tachygrams, left_anchor, left_proof) = acc?;
                 let (right_desc, right_digests, right_tachygrams, right_anchor, right_proof) =
@@ -408,7 +420,7 @@ impl Plan {
                         (left_digests, left_tachygrams, left_anchor, left_proof),
                         (right_digests, right_tachygrams, right_anchor, right_proof),
                     )
-                    .map_err(ProveError::MergeFailed)?;
+                    .map_err(ProveError::ProofFailed)?;
 
                 let merged_descs = left_desc.union(&right_desc).copied().collect();
 
@@ -420,7 +432,10 @@ impl Plan {
                     merged_proof,
                 ))
             })
-            .ok_or(ProveError::NoActions)??;
+            .transpose()?
+            .ok_or(ProveError::MissingPcd(
+                "no proof for no planned actions".into(),
+            ))?;
 
         let coverage = blake2b::action_descriptor_digest(&Vec::<[u8; 64]>::from_iter(descriptors));
         let tachygram_set = tachygrams
@@ -443,22 +458,15 @@ impl Plan {
 #[derive(Debug, Display, Error)]
 #[non_exhaustive]
 pub enum ProveError {
-    /// The plan has no actions to prove.
-    #[display("no actions to prove")]
-    NoActions,
+    /// Missing PCD inputs for the operation.
+    #[display("missing pcd inputs: {_0}")]
+    MissingPcd(Box<dyn error::Error + Send + Sync + 'static>),
     /// Action digest construction failed (cv or rk was the identity point).
     #[display("action digest failed: {_0}")]
     ActionDigest(ActionDigestError),
-    /// Proof creation failed for an action; carries the underlying
-    /// step-level error.
-    #[display("action proof failed: {_0}")]
+    /// Proof creation failed; carries the underlying step-level error.
+    #[display("proof failed: {_0}")]
     ProofFailed(ragu::Error),
-    /// Stamp merge failed; carries the underlying step-level error.
-    #[display("stamp merge failed: {_0}")]
-    MergeFailed(ragu::Error),
-    /// Number of spendable PCDs doesn't match number of spends.
-    #[display("spendable PCD count mismatch")]
-    SpendableMismatch,
 }
 
 /// A stamp carrying tachygrams, anchor, and a proof for specific actions.
@@ -474,17 +482,13 @@ pub struct ProofStamp {
     /// See [`blake2b::action_descriptor_digest`]
     pub coverage: [u8; 32],
 
-    /// Pool state at the anchor block.
+    /// The historic pool state for which this stamp is valid.
     pub anchor: Anchor,
 
-    /// Commitment to the tachygram multiset below, so that anchor advancement
-    /// reads the point rather than rebuilding it.
-    ///
-    /// Carried, not derived, so full validation must confirm it against
-    /// `tachygrams`. See [`ProofStamp::is_accumulating`].
+    /// The commitment to this stamp's tachygram set.
     pub tachygram_set: TachygramSetCommit,
 
-    /// Tachygrams (nullifiers and note commitments) for data availability.
+    /// This stamp's tachygram set.
     pub tachygrams: BTreeSet<Tachygram>,
 
     /// The Ragu proof bytes.
@@ -633,6 +637,72 @@ impl ProofStamp {
         ))
     }
 
+    /// Advances the stamp's anchor with the provided anchor chain proof.
+    pub fn prove_lift<RNG: RngCore + CryptoRng>(
+        self,
+        rng: &mut RNG,
+        action_digests: impl IntoIterator<Item = ActionDigest>,
+        anchor_chain: ragu::Pcd<pool::AnchorChain>,
+    ) -> Result<Self, ragu::Error> {
+        let action_set = action_digests.into_iter().collect::<ActionSetPoly>();
+        let stamp_pcd =
+            self.proof
+                .carry::<StampHeader>((action_set.commit(), self.tachygram_set, self.anchor));
+
+        let (pcd, ()) = PROOF_SYSTEM.fuse(rng, StampLift, (), stamp_pcd, anchor_chain)?;
+        let anchor = pcd.data().2;
+        let rerand = PROOF_SYSTEM.rerandomize(pcd, rng)?;
+
+        Ok(Self {
+            coverage: self.coverage,
+            anchor,
+            tachygram_set: self.tachygram_set,
+            tachygrams: self.tachygrams,
+            proof: Box::new(rerand.proof().clone()),
+        })
+    }
+
+    /// Advances the stamp's anchor with a proof of the provided sequence.
+    pub fn lift<RNG: RngCore + CryptoRng>(
+        self,
+        rng: &mut RNG,
+        descriptors: &BTreeSet<action::Descriptor>,
+        seed_witnesses: Vec<(Anchor, EpochIndex, TachygramSetCommit)>,
+    ) -> Result<Self, ProveError> {
+        let anchor_seeds = seed_witnesses
+            .into_iter()
+            .map(|witness| {
+                PROOF_SYSTEM
+                    .seed(rng, pool::AnchorSeed, witness)
+                    .map(|(pcd, _aux)| pcd)
+                    .map_err(ProveError::ProofFailed)
+            })
+            .collect::<Result<Vec<_>, ProveError>>()?;
+
+        let anchor_chain = anchor_seeds
+            .into_iter()
+            .map(Ok)
+            .reduce(|left, right| {
+                PROOF_SYSTEM
+                    .fuse(rng, pool::AnchorFuse, (), left?, right?)
+                    .map(|(pcd, _aux)| pcd)
+                    .map_err(ProveError::ProofFailed)
+            })
+            .transpose()?
+            .ok_or(ProveError::MissingPcd(
+                "no anchor chain proof for no anchor advance".into(),
+            ))?;
+
+        let action_digests = descriptors
+            .iter()
+            .map(action::Descriptor::digest)
+            .collect::<Result<BTreeSet<ActionDigest>, ActionDigestError>>()
+            .map_err(ProveError::ActionDigest)?;
+
+        self.prove_lift(rng, action_digests, anchor_chain)
+            .map_err(ProveError::ProofFailed)
+    }
+
     /// Merges two stamps into one covering stamp.
     ///
     /// Each side pairs a stamp with the descriptors of its covered actions.
@@ -672,7 +742,7 @@ impl ProofStamp {
                 right_stamp.proof,
             ),
         )
-        .map_err(ProveError::MergeFailed)?;
+        .map_err(ProveError::ProofFailed)?;
 
         let coverage = blake2b::action_descriptor_digest(
             &left_desc

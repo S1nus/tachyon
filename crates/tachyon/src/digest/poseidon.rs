@@ -7,8 +7,6 @@ use group::{GroupEncoding as _, prime::PrimeCurveAffine as _};
 use pasta_curves::{EpAffine, EqAffine, Fp, arithmetic::Coordinates};
 use ragu::Sponge;
 
-use crate::EpochIndex;
-
 #[expect(
     clippy::expect_used,
     reason = "mock sponge absorb/squeeze cannot fail in wireless `Always` mode"
@@ -134,7 +132,7 @@ fn point_limbs(point: EqAffine) -> (Fp, Fp) {
     )
 }
 
-const ANCHOR_STAMP_DOMAIN: &[u8; 16] = b"Tachyon-StampFld";
+const ANCHOR_STAMP_DOMAIN: &[u8; 16] = b"Tachyon-AnchorSt";
 
 /// Advances the anchor by absorbing one stamp's epoch and tachygram-set
 /// commitment.
@@ -143,25 +141,25 @@ const ANCHOR_STAMP_DOMAIN: &[u8; 16] = b"Tachyon-StampFld";
 ///
 /// Panics if `tgs` is the identity point.
 #[must_use]
-pub(crate) fn anchor_stamp_step(anchor_prev: Fp, epoch: EpochIndex, tgs: EqAffine) -> Fp {
+pub(crate) fn anchor_next_stamp(anchor_prev: Fp, epoch: Fp, tgs: EqAffine) -> Fp {
     let (tgs_lo, tgs_hi) = point_limbs(tgs);
     hash::<5>([
         Fp::from_u128(u128::from_le_bytes(*ANCHOR_STAMP_DOMAIN)),
         anchor_prev,
-        Fp::from(epoch),
+        epoch,
         tgs_lo,
         tgs_hi,
     ])
 }
 
-const ANCHOR_EPOCH_DOMAIN: &[u8; 16] = b"Tachyon-EpochStp";
+const ANCHOR_EPOCH_DOMAIN: &[u8; 16] = b"Tachyon-AnchorEp";
 
 /// Advances the terminal anchor of an epoch into a new epoch's initial state.
 #[must_use]
-pub(crate) fn anchor_epoch_step(anchor_prev: Fp, new_epoch: EpochIndex) -> Fp {
+pub(crate) fn anchor_next_epoch(anchor_prev: Fp, new_epoch: Fp) -> Fp {
     hash::<3>([
         Fp::from_u128(u128::from_le_bytes(*ANCHOR_EPOCH_DOMAIN)),
         anchor_prev,
-        Fp::from(new_epoch),
+        new_epoch,
     ])
 }

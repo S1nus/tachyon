@@ -1047,6 +1047,3 @@ impl Signature {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests;

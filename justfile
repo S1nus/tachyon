@@ -12,7 +12,7 @@ test *ARGS:
     cargo test --workspace --all-features {{ARGS}}
 
 doc:
-    cargo doc --workspace --no-deps --all-features --document-private-items
+    cargo doc --workspace --no-deps --document-private-items
 
 check:
     cargo check --workspace --lib --no-default-features # no_std

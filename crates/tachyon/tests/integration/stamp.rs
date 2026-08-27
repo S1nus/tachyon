@@ -1,20 +1,22 @@
-#![allow(clippy::panic, clippy::too_many_lines, reason = "test code")]
+extern crate alloc;
 
-use alloc::{boxed::Box, string::ToString as _, vec, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeSet, string::ToString as _, vec, vec::Vec};
 
 use ff::Field as _;
+use pasta_curves::Fp;
 use rand::{SeedableRng as _, rngs::StdRng};
-
-use super::*;
-use crate::{
+use zcash_tachyon::{
+    ActionDigest, Anchor, BlockHeight, CompactSize, ProofStamp, Tachygram, TachygramSetPoly,
     action,
     constants::EPOCH_SIZE,
-    fixtures::{
-        PoolSim, WalletSim, build_anchor_chain_pcd, build_autonome, build_output_stamp,
-        forge_overlapping_merge, random_action, random_block, random_block_with, shared_sk,
-        spend_witness,
-    },
-    primitives::BlockHeight,
+    digest::blake2b,
+    stamp::{Plan, ProveError},
+};
+
+use crate::fixtures::{
+    PoolSim, WalletSim, build_anchor_chain_pcd, build_autonome, build_output_stamp,
+    forge_overlapping_merge, random_action, random_block, random_block_with, shared_sk,
+    spend_witness,
 };
 
 const WITHIN_EPOCH_ANCHOR_PAIRS: &[(BlockHeight, BlockHeight)] = &[
@@ -618,30 +620,25 @@ fn verify_proof_action_multiset_invariants() {
 fn read_rejects_duplicate_tachygrams() {
     let rng = &mut StdRng::seed_from_u64(0);
 
-    let anchor = Anchor(Fp::random(&mut *rng));
-    let tg = Tachygram::random(&mut *rng);
+    let anchor = Anchor::from(Fp::random(&mut *rng));
+    let tg = Tachygram::from(Fp::random(&mut *rng));
     let tg_set = [tg, tg];
 
     let mut buf = Vec::new();
     {
         buf.extend_from_slice(&[0u8; 32]); // dummy actions digest
         anchor.write(&mut buf).expect("write anchor");
-        serialization::write_eq_affine(
-            &mut buf,
-            &TachygramSetPoly::from_iter(tg_set)
-                .commit()
-                .as_ref()
-                .to_affine(),
-        )
-        .expect("write tachygram set commitment");
+        TachygramSetPoly::from_iter(tg_set)
+            .commit()
+            .write(&mut buf)
+            .expect("write tachygram set commitment");
 
-        serialization::write_compactsize(
-            &mut buf,
-            tg_set.len().try_into().expect("tachygram count"),
-        )
-        .expect("write tachygram count");
+        CompactSize::from(u64::try_from(tg_set.len()).expect("tachygram count"))
+            .write(&mut buf)
+            .expect("write tachygram count");
+
         for write_tg in tg_set {
-            serialization::write_fp(&mut buf, &write_tg.into()).expect("write tachygram");
+            write_tg.write(&mut buf).expect("write tachygram");
         }
     }
 
@@ -673,7 +670,7 @@ fn covered_actions_round_trip() {
     let note = wallet.random_note(200);
     let (stamp, _plan) = build_output_stamp(rng, pool.anchor(), note);
 
-    let mut buf = Vec::new();
+    let mut buf: Vec<u8> = Vec::new();
     stamp.write(&mut buf).expect("write");
     let decoded = ProofStamp::read(&*buf).expect("read");
 
@@ -692,7 +689,10 @@ fn accumulating_accepts_honest_stamp() {
     let note = wallet.random_note(200);
     let (stamp, _plan) = build_output_stamp(rng, pool.anchor(), note);
 
-    assert!(stamp.is_accumulating());
+    assert_eq!(
+        TachygramSetPoly::from_iter(stamp.tachygrams.clone()).commit(),
+        stamp.tachygram_set
+    );
 }
 
 /// A carried commitment over the wrong tachygrams is rejected, and the
@@ -712,7 +712,10 @@ fn accumulating_rejects_mismatched_commitment() {
         ..honest
     };
 
-    assert!(!forged.is_accumulating());
+    assert_ne!(
+        TachygramSetPoly::from_iter(forged.tachygrams.clone()).commit(),
+        forged.tachygram_set.clone()
+    );
     assert!(
         !forged
             .verify_proof(rng, [plan.digest().expect("valid plan")])

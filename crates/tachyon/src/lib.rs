@@ -14,6 +14,7 @@ extern crate alloc;
 pub mod action;
 pub mod bundle;
 pub mod constants;
+pub mod digest;
 pub mod entropy;
 pub mod keys;
 pub mod note;
@@ -23,13 +24,9 @@ pub mod stamp;
 pub mod value;
 pub mod witness;
 
-mod digest;
 mod primitives;
 mod relations;
 mod serialization;
-
-#[cfg(test)]
-pub(crate) mod fixtures;
 
 pub use action::{Action, Plan as ActionPlan};
 pub use bundle::{

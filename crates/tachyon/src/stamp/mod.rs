@@ -1,6 +1,11 @@
 //! Stamps and anchors.
 
 #![allow(clippy::module_name_repetitions, reason = "intentional names")]
+#![allow(
+    clippy::multiple_inherent_impl,
+    clippy::same_name_method,
+    reason = "todo: take read/write off StampState"
+)]
 
 extern crate alloc;
 
@@ -114,12 +119,12 @@ pub trait StampState: BundleState {
         Self: Sized;
 
     /// Read the stamp trailer from the consensus wire format.
-    fn read<R: Read>(reader: R) -> io::Result<Self>
+    fn read<R: Read>(reader: &mut R) -> io::Result<Self>
     where
         Self: Sized;
 
     /// Write the stamp trailer in the consensus wire format.
-    fn write<W: Write>(&self, writer: W) -> io::Result<()>
+    fn write<W: Write>(&self, writer: &mut W) -> io::Result<()>
     where
         Self: Sized;
 }
@@ -133,8 +138,18 @@ impl StampState for PointerStamp {
         StateByte::PointerStamped
     }
 
+    fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
+        Self::read(reader)
+    }
+
+    fn write<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.write(writer)
+    }
+}
+
+impl PointerStamp {
     /// Read an aggregate id from the consensus wire format.
-    fn read<R: Read>(mut reader: R) -> io::Result<Self> {
+    pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
         let mut wtxid = [0u8; 64];
         reader.read_exact(&mut wtxid)?;
         Self::try_from(wtxid).map_err(|_err| {
@@ -146,7 +161,7 @@ impl StampState for PointerStamp {
     }
 
     /// Write an aggregate id to the consensus wire format.
-    fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
+    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         if self.0 == [0u8; 64] {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -189,9 +204,19 @@ impl StampState for ProofStamp {
         StateByte::ProofStamped
     }
 
+    fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
+        Self::read(reader)
+    }
+
+    fn write<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.write(writer)
+    }
+}
+
+impl ProofStamp {
     /// Read a stamp from the consensus wire format. The proof blob has a
     /// known constant size.
-    fn read<R: Read>(mut reader: R) -> io::Result<Self> {
+    pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
         let mut covered_actions = [0u8; 32];
         reader.read_exact(&mut covered_actions)?;
 
@@ -254,7 +279,7 @@ impl StampState for ProofStamp {
 
     /// Write a stamp to the consensus wire format. The proof blob has a
     /// known constant size.
-    fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
+    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         writer.write_all(&self.coverage)?;
         self.anchor.write(&mut writer)?;
         serialization::write_eq_affine(&mut writer, &self.tachygram_set.as_ref().to_affine())?;
@@ -772,10 +797,7 @@ impl ProofStamp {
     ///
     /// The parameter is a multiset: order does not matter, multiplicity does.
     #[must_use]
-    pub(crate) fn is_covering(
-        &self,
-        action_descs: impl IntoIterator<Item = action::Descriptor>,
-    ) -> bool {
+    pub fn is_covering(&self, action_descs: impl IntoIterator<Item = action::Descriptor>) -> bool {
         let mut desc_bytes = action_descs.into_iter().collect::<Vec<[u8; 64]>>();
         desc_bytes.sort_unstable();
         blake2b::action_descriptor_digest(&desc_bytes) == self.coverage
@@ -791,7 +813,7 @@ impl ProofStamp {
     /// stamp could publish a list omitting a nullifier the accumulator
     /// contains, which is what the two-epoch duplicate scan reads.
     #[must_use]
-    pub(crate) fn is_accumulating(&self) -> bool {
+    fn is_accumulating(&self) -> bool {
         self.tachygrams
             .iter()
             .copied()
@@ -806,7 +828,7 @@ impl ProofStamp {
     /// # Soundness
     ///
     /// The parameter is a multiset: order does not matter, multiplicity does.
-    pub(crate) fn verify_proof<RNG: CryptoRng>(
+    pub fn verify_proof<RNG: CryptoRng>(
         &self,
         rng: &mut RNG,
         action_digests: impl IntoIterator<Item = ActionDigest>,
@@ -826,6 +848,3 @@ impl ProofStamp {
         PROOF_SYSTEM.verify(&pcd, rng)
     }
 }
-
-#[cfg(test)]
-mod tests;

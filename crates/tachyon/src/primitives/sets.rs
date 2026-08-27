@@ -2,15 +2,32 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use corez::io::{self, Read, Write};
 use derive_more::{AsRef, Debug, Eq as TotalEq, From, Into, PartialEq};
+use group::Curve as _;
 use pasta_curves::{Eq, Fp};
 use ragu::{Polynomial, poly_with_roots};
 
 use super::{ActionDigest, Tachygram};
+use crate::serialization;
 
 /// Pedersen commitment to a stamp's tachygram set.
 #[derive(AsRef, Clone, Copy, Debug, From, Into, PartialEq, TotalEq)]
 pub struct TachygramSetCommit(Eq);
+
+impl TachygramSetCommit {
+    /// Read as an affine point from the consensus wire format.
+    pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
+        let commit = serialization::read_eq_affine(&mut reader)?;
+        Ok(Self(commit.into()))
+    }
+
+    /// Write as an affine point to the consensus wire format.
+    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        serialization::write_eq_affine(&mut writer, &self.0.to_affine())?;
+        Ok(())
+    }
+}
 
 impl Default for TachygramSetCommit {
     /// A commitment to an empty set.
@@ -22,6 +39,20 @@ impl Default for TachygramSetCommit {
 /// Pedersen commitment to a stamp's action-digest set.
 #[derive(AsRef, Clone, Copy, Debug, From, Into, PartialEq, TotalEq)]
 pub struct ActionSetCommit(Eq);
+
+impl ActionSetCommit {
+    /// Read as an affine point from the consensus wire format.
+    pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
+        let commit = serialization::read_eq_affine(&mut reader)?;
+        Ok(Self(commit.into()))
+    }
+
+    /// Write as an affine point to the consensus wire format.
+    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        serialization::write_eq_affine(&mut writer, &self.0.to_affine())?;
+        Ok(())
+    }
+}
 
 impl Default for ActionSetCommit {
     /// A commitment to an empty set.

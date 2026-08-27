@@ -2,8 +2,6 @@
 //! derivation chain, `ArbitraryUnspent` composition, and the `Spendable*`
 //! lineage.
 
-#![allow(clippy::panic, reason = "test code")]
-
 extern crate alloc;
 
 use alloc::{string::ToString as _, vec, vec::Vec};
@@ -14,22 +12,22 @@ use pasta_curves::Fp;
 use ragu::{Pcd, Proof};
 use rand::{SeedableRng as _, rngs::StdRng};
 use rand_core::CryptoRng;
-
-use super::{PROOF_SYSTEM, delegation, output, pool, spend, spendable, stamp};
-use crate::{
-    ActionSetPoly, NfSeqPoly, Note, TachygramSetPoly,
+use zcash_tachyon::{
+    ActionSetPoly, Anchor, BlockHeight, EpochIndex, NfSeqPoly, Note, Tachygram, TachygramSetPoly,
     constants::EPOCH_SIZE,
     digest::poseidon,
+    effect,
     entropy::ActionEntropy,
-    fixtures::{
-        PoolSim, SyncSim, WalletSim, build_anchor_chain_pcd, build_output_plan, build_output_stamp,
-        build_unspent_pcd_between_anchors, build_unspent_pcd_between_blocks,
-        build_unspent_seed_pcd, random_block, random_block_with, shared_sk, spend_witness,
-    },
     note,
     nullifier::{self, Nullifier},
-    primitives::{Anchor, BlockHeight, EpochIndex, Tachygram, effect},
+    stamp::proof::{PROOF_SYSTEM, delegation, output, pool, spend, spendable, stamp},
     value, witness,
+};
+
+use crate::fixtures::{
+    PoolSim, SyncSim, WalletSim, build_anchor_chain_pcd, build_output_plan, build_output_stamp,
+    build_unspent_pcd_between_anchors, build_unspent_pcd_between_blocks, build_unspent_seed_pcd,
+    random_block, random_block_with, shared_sk, spend_witness,
 };
 
 fn mine_cm_block(rng: &mut StdRng, pool: &mut PoolSim, cm: note::Commitment) -> BlockHeight {
@@ -149,7 +147,7 @@ fn spendable_init_rejects_tg_absent() {
 
     let nf_header = user.derived_range(rng, &note, EpochIndex(0), 1);
     let present_nf = user.nf_at(&note, EpochIndex(0));
-    let absent_tg = Tachygram::random(&mut *rng);
+    let absent_tg = Tachygram::from(Fp::random(&mut *rng));
 
     let err = PROOF_SYSTEM
         .fuse(
@@ -198,8 +196,8 @@ fn unspent_seed_rejects_tg_present() {
 #[test]
 fn unspent_fuse_rejects_invalid_compositions() {
     let rng = &mut StdRng::seed_from_u64(0);
-    let stamps_left = vec![Tachygram::random(&mut *rng)];
-    let stamps_right = vec![Tachygram::random(&mut *rng)];
+    let stamps_left = vec![Tachygram::from(Fp::random(&mut *rng))];
+    let stamps_right = vec![Tachygram::from(Fp::random(&mut *rng))];
     let start = Anchor::default();
     let mid = start
         .next_stamp(
@@ -991,7 +989,7 @@ fn unspent_fuse_rejects_epoch_boundary_crossing() {
     // A forged epoch-1 right half rooted directly at `left.anchor_last` (no
     // `next_epoch` fold). The anchors line up, but the epoch labels reveal a
     // boundary the fuse refuses to cross: a crossing needs its own segment.
-    let stamp = [Tachygram::random(&mut *rng)];
+    let stamp = [Tachygram::from(Fp::random(&mut *rng))];
     let forged_right = build_unspent_seed_pcd(rng, left_end, EpochIndex(1), &stamp, nf1);
 
     let err = PROOF_SYSTEM

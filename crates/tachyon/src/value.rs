@@ -156,11 +156,6 @@ impl<const MIN: i64, const MAX: i64> Value<MIN, MAX> {
         }
         Value(-self.0)
     }
-
-    #[cfg(test)]
-    pub(crate) const fn new_unchecked(value: i64) -> Self {
-        Self(value)
-    }
 }
 
 impl<const MIN: i64, const MAX: i64> TryFrom<i64> for Value<MIN, MAX> {

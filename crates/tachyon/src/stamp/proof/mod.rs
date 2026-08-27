@@ -12,9 +12,6 @@ pub mod spend;
 pub mod spendable;
 pub mod stamp;
 
-#[cfg(test)]
-mod tests;
-
 use lazy_static::lazy_static;
 pub use ragu::Proof;
 use ragu::{Application, ApplicationBuilder};
@@ -43,7 +40,8 @@ fn make_app() -> Result<Application, ragu::Error> {
 }
 
 lazy_static! {
-    pub(crate) static ref PROOF_SYSTEM: Application = {
+    /// A static ref to the mock ragu application.
+    pub static ref PROOF_SYSTEM: Application = {
         #[expect(
             clippy::expect_used,
             reason = "hardcoded step ordering must register cleanly"

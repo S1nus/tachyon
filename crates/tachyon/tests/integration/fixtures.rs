@@ -1,36 +1,24 @@
-#![allow(
-    unreachable_pub,
-    clippy::type_complexity,
-    clippy::as_conversions,
-    clippy::partial_pub_fields,
-    clippy::too_many_lines,
-    clippy::too_many_arguments,
-    reason = "test code"
-)]
-
 extern crate alloc;
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{cell::RefCell, iter, ops::RangeInclusive};
 
-use ff::PrimeField as _;
+use ff::{Field as _, PrimeField as _};
 use pasta_curves::Fp;
 use ragu::{Pcd, Proof};
 use rand::{SeedableRng as _, rngs::StdRng};
 use rand_core::CryptoRng;
-
-use crate::{
+use zcash_tachyon::{
+    ActionSetPoly, Anchor, BlockHeight, EpochIndex, Tachygram, TachygramSetCommit,
+    TachygramSetPoly,
     action::{self, Action},
     bundle::{self, Bundle},
     digest::blake2b,
+    effect,
     entropy::{ActionEntropy, ActionRandomizer},
     keys::{NoteMasterKey, PaymentKey, ProofAuthorizingKey, private},
     note::{self, Note},
     nullifier::{self, Nullifier},
-    primitives::{
-        ActionSetPoly, Anchor, BlockHeight, EpochIndex, Tachygram, TachygramSetCommit,
-        TachygramSetPoly, effect,
-    },
     stamp::{
         PointerStamp, ProofStamp, StampState,
         proof::{
@@ -261,7 +249,7 @@ pub fn random_block<RNG: CryptoRng>(
     n_stamps: usize,
 ) -> Vec<Vec<Tachygram>> {
     iter::repeat_with(|| {
-        iter::repeat_with(|| Tachygram::random(&mut *rng))
+        iter::repeat_with(|| Tachygram::from(Fp::random(&mut *rng)))
             .take(stamp_size)
             .collect()
     })
@@ -283,7 +271,7 @@ pub fn random_block_with<RNG: CryptoRng>(
         .map(|cms| cms.iter().map(|&cm| Tachygram::from(cm)).collect())
         .collect();
     stamps.extend(
-        iter::repeat_with(|| alloc::vec![Tachygram::random(&mut *rng)])
+        iter::repeat_with(|| alloc::vec![Tachygram::from(Fp::random(&mut *rng))])
             .take(n_stamps - stamps_cms.len()),
     );
     stamps
@@ -614,11 +602,6 @@ fn fuse_unspent_tree<RNG: CryptoRng>(
     if chains.len() == 1 {
         return chains.pop().expect("single chain");
     }
-    #[expect(
-        clippy::integer_division,
-        clippy::integer_division_remainder_used,
-        reason = "midpoint split"
-    )]
     let right_chains = chains.split_off(chains.len() / 2);
     let left = fuse_unspent_tree(rng, nf, base, chains);
     let right = fuse_unspent_tree(rng, nf, base, right_chains);
@@ -668,15 +651,7 @@ fn note_stream_seed(pk: PaymentKey, value: u64) -> [u8; 32] {
 pub struct WalletSim {
     pub sk: private::SpendingKey,
     pub pak: ProofAuthorizingKey,
-    /// One note-material stream per requested value, each seeded
-    /// deterministically from `(sk, value)` (independent of any caller
-    /// RNG). `random_note(value)` draws the next note from that value's
-    /// stream, so the k-th note of a given value is identical across every
-    /// wallet built from the same `sk`, and its `cm` collides, reusing
-    /// shared per-note work. Keying by value keeps distinct asks independent:
-    /// different values draw from disjoint field sequences, and interleaved
-    /// draws of other values never shift a stream's position.
-    notes: RefCell<BTreeMap<u64, StdRng>>,
+    pub notes: RefCell<BTreeMap<u64, StdRng>>,
 }
 
 impl WalletSim {
@@ -935,7 +910,7 @@ struct SyncEntry {
 
 impl SyncSim {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
         }
@@ -1021,8 +996,7 @@ pub mod ggm_tools {
 
     use ragu::{Pcd, Proof};
     use rand_core::CryptoRng;
-
-    use crate::{
+    use zcash_tachyon::{
         EpochIndex,
         digest::poseidon,
         keys::{GGM_CHUNK_SIZE, GGM_TREE_DEPTH},

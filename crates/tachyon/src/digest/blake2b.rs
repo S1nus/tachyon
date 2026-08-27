@@ -53,7 +53,8 @@ const OUTPUT_ALPHA_PERSONALIZATION: &[u8; 14] = b"Tachyon-Output";
 /// $$
 ///
 /// Caller reduces to scalar via `Fq::from_uniform_bytes`.
-pub(crate) fn alpha_spend(theta: &[u8; 32], cm: &[u8; 32]) -> [u8; 64] {
+#[must_use]
+pub fn alpha_spend(theta: &[u8; 32], cm: &[u8; 32]) -> [u8; 64] {
     hasher_512(SPEND_ALPHA_PERSONALIZATION, |state| {
         state.update(theta);
         state.update(cm);
@@ -67,7 +68,8 @@ pub(crate) fn alpha_spend(theta: &[u8; 32], cm: &[u8; 32]) -> [u8; 64] {
 ///     \theta \| cm
 ///   )
 /// $$
-pub(crate) fn alpha_output(theta: &[u8; 32], cm: &[u8; 32]) -> [u8; 64] {
+#[must_use]
+pub fn alpha_output(theta: &[u8; 32], cm: &[u8; 32]) -> [u8; 64] {
     hasher_512(OUTPUT_ALPHA_PERSONALIZATION, |state| {
         state.update(theta);
         state.update(cm);
@@ -90,7 +92,8 @@ const PRF_EXPAND_DOMAIN_NK: u8 = 0x22;
 /// Mirrors Zcash §5.4.2.
 ///
 /// TODO: return normalized Fq?
-pub(crate) fn prf_expand_ask(sk: &[u8; 32]) -> [u8; 64] {
+#[must_use]
+pub fn prf_expand_ask(sk: &[u8; 32]) -> [u8; 64] {
     hasher_512(PRF_EXPAND_PERSONALIZATION, |state| {
         state.update(sk);
         state.update(&[PRF_EXPAND_DOMAIN_ASK]);
@@ -106,7 +109,8 @@ pub(crate) fn prf_expand_ask(sk: &[u8; 32]) -> [u8; 64] {
 /// $$
 ///
 /// TODO: return normalized Fq?
-pub(crate) fn prf_expand_nk(sk: &[u8; 32]) -> [u8; 64] {
+#[must_use]
+pub fn prf_expand_nk(sk: &[u8; 32]) -> [u8; 64] {
     hasher_512(PRF_EXPAND_PERSONALIZATION, |state| {
         state.update(sk);
         state.update(&[PRF_EXPAND_DOMAIN_NK]);
@@ -129,7 +133,8 @@ const ACTION_DESCRIPTOR_PERSONALIZATION: &[u8; 15] = b"Tachyon-Actions";
 /// Over a bundle's actions this is `hActionsTachyon`.
 ///
 /// Over a stamp's covered actions this is `hStampActionsTachyon`.
-pub(crate) fn action_descriptor_digest(descriptors: &[[u8; 64]]) -> [u8; 32] {
+#[must_use]
+pub fn action_descriptor_digest(descriptors: &[[u8; 64]]) -> [u8; 32] {
     hasher_256(ACTION_DESCRIPTOR_PERSONALIZATION, |state| {
         for descriptor in descriptors {
             state.update(descriptor);
@@ -149,7 +154,8 @@ const MEMO_PERSONALIZATION: &[u8; 12] = b"Tachyon-Memo";
 ///
 /// This is `hMemoTachyon`. Hashing the payload to a fixed width here is what
 /// lets [`bundle_commitment`] absorb it without a length prefix.
-pub(crate) fn memo_digest(memo: &[u8]) -> [u8; 32] {
+#[must_use]
+pub fn memo_digest(memo: &[u8]) -> [u8; 32] {
     hasher_256(MEMO_PERSONALIZATION, |state| {
         state.update(memo);
     })
@@ -174,7 +180,7 @@ const AUTH_DIGEST_PERSONALIZATION: &[u8; 16] = b"ZTxAuthTachyHash";
 /// because it is effecting: relayers rewrite `auth_digest` during aggregation,
 /// so only the sighash can hold a payload a miner must not strip.
 #[must_use]
-pub(crate) fn bundle_commitment(
+pub fn bundle_commitment(
     action_commit: &[u8; 32],
     value_balance: i64,
     memo_digest: &[u8; 32],
@@ -196,7 +202,8 @@ const STAMP_PROOF_PERSONALIZATION: &[u8; 13] = b"Tachyon-Proof";
 ///     \mathsf{proofTachyon}
 ///   )
 /// $$
-pub(crate) fn stamp_proof_digest(proof: &[u8]) -> [u8; 32] {
+#[must_use]
+pub fn stamp_proof_digest(proof: &[u8]) -> [u8; 32] {
     hasher_256(STAMP_PROOF_PERSONALIZATION, |state| {
         state.update(proof);
     })
@@ -216,7 +223,8 @@ pub(crate) fn stamp_proof_digest(proof: &[u8]) -> [u8; 32] {
 ///     \mathsf{vTachygrams}
 ///   )
 /// $$
-pub(crate) fn stamp_data_digest(
+#[must_use]
+pub fn stamp_data_digest(
     stamp_proof_digest: [u8; 32],
     anchor: [u8; 32],
     tachygram_set: [u8; 32],
@@ -250,7 +258,8 @@ pub(crate) fn stamp_data_digest(
 /// | ----------------------------- | ---- | ---------------------------- |
 /// | `0x01` | [`ProofStamp`](crate::stamp::ProofStamp) | $ \mathsf{hStampActionsTachyon} \| \mathsf{hStampDataTachyon} $ |
 /// | `0x02` | [`PointerStamp`](crate::stamp::PointerStamp) | aggregate's `wtxid` |
-pub(crate) fn bundle_auth_digest(
+#[must_use]
+pub fn bundle_auth_digest(
     state_header: u8,
     action_sigs: &[[u8; 64]],
     binding_sig: &[u8; 64],

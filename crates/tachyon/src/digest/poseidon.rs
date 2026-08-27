@@ -22,7 +22,8 @@ fn hash<const L: usize>(input: [Fp; L]) -> Fp {
 const ACTION_DIGEST_DOMAIN: &[u8; 16] = b"Tachyon-ActionDg";
 
 /// Derives an action digest from action fields.
-pub(crate) fn action_digest(cv: Coordinates<EpAffine>, rk: Coordinates<EpAffine>) -> Fp {
+#[must_use]
+pub fn action_digest(cv: Coordinates<EpAffine>, rk: Coordinates<EpAffine>) -> Fp {
     hash::<5>([
         Fp::from_u128(u128::from_le_bytes(*ACTION_DIGEST_DOMAIN)),
         *cv.x(),
@@ -36,7 +37,7 @@ const PAYMENT_KEY_DOMAIN: &[u8; 16] = b"Tachyon-PkDerive";
 
 /// Derives a payment key from a spend validating key and nullifier key.
 #[must_use]
-pub(crate) fn payment_key(ak: Coordinates<EpAffine>, nk: Fp) -> Fp {
+pub fn payment_key(ak: Coordinates<EpAffine>, nk: Fp) -> Fp {
     hash::<4>([
         Fp::from_u128(u128::from_le_bytes(*PAYMENT_KEY_DOMAIN)),
         *ak.x(),
@@ -49,7 +50,7 @@ const NOTE_COMMITMENT_DOMAIN: &[u8; 16] = b"Tachyon-CmDerive";
 
 /// Derives a note commitment from note fields.
 #[must_use]
-pub(crate) fn note_commitment(rcm: Fp, pk: Fp, value: u64, psi: Fp) -> Fp {
+pub fn note_commitment(rcm: Fp, pk: Fp, value: u64, psi: Fp) -> Fp {
     hash::<5>([
         Fp::from_u128(u128::from_le_bytes(*NOTE_COMMITMENT_DOMAIN)),
         rcm,
@@ -59,7 +60,7 @@ pub(crate) fn note_commitment(rcm: Fp, pk: Fp, value: u64, psi: Fp) -> Fp {
     ])
 }
 
-const PAD_TACHYGRAM_DOMAIN: &[u8; 16] = b"Tachyon-PadDeriv";
+const PAD_COMMITMENT_DOMAIN: &[u8; 16] = b"Tachyon-CmOutPad";
 
 /// Derives an output's padding tachygram from the same note fields
 /// [`note_commitment`] commits to.
@@ -68,9 +69,9 @@ const PAD_TACHYGRAM_DOMAIN: &[u8; 16] = b"Tachyon-PadDeriv";
 /// published in one multiset, so a pad derived from $\mathsf{cm}$ would let an
 /// observer pair them off and recover the output count.
 #[must_use]
-pub(crate) fn pad_tachygram(rcm: Fp, pk: Fp, value: u64, psi: Fp) -> Fp {
+pub fn pad_tachygram(rcm: Fp, pk: Fp, value: u64, psi: Fp) -> Fp {
     hash::<5>([
-        Fp::from_u128(u128::from_le_bytes(*PAD_TACHYGRAM_DOMAIN)),
+        Fp::from_u128(u128::from_le_bytes(*PAD_COMMITMENT_DOMAIN)),
         rcm,
         pk,
         Fp::from(value),
@@ -82,7 +83,7 @@ const NULLIFIER_PREFIX_DOMAIN: &[u8; 16] = b"Tachyon-NfPrefix";
 
 /// Derives a GGM root (master key) from note trapdoor and wallet nullifier key.
 #[must_use]
-pub(crate) fn nf_master(psi: Fp, nk: Fp) -> Fp {
+pub fn nf_master(psi: Fp, nk: Fp) -> Fp {
     hash::<3>([
         Fp::from_u128(u128::from_le_bytes(*NULLIFIER_PREFIX_DOMAIN)),
         psi,
@@ -92,7 +93,7 @@ pub(crate) fn nf_master(psi: Fp, nk: Fp) -> Fp {
 
 /// Derives a nullifier prefix from a previous prefix and a walk direction.
 #[must_use]
-pub(crate) fn nf_prefix(prefix_prev: Fp, step: u8) -> Fp {
+pub fn nf_prefix(prefix_prev: Fp, step: u8) -> Fp {
     hash::<3>([
         Fp::from_u128(u128::from_le_bytes(*NULLIFIER_PREFIX_DOMAIN)),
         prefix_prev,
@@ -104,7 +105,7 @@ const NULLIFIER_DOMAIN: &[u8; 16] = b"Tachyon-NfDerive";
 
 /// Derives a nullifier from a leaf of the prefix tree.
 #[must_use]
-pub(crate) fn nullifier(leaf: Fp) -> Fp {
+pub fn nullifier(leaf: Fp) -> Fp {
     hash::<2>([Fp::from_u128(u128::from_le_bytes(*NULLIFIER_DOMAIN)), leaf])
 }
 
@@ -141,7 +142,7 @@ const ANCHOR_STAMP_DOMAIN: &[u8; 16] = b"Tachyon-AnchorSt";
 ///
 /// Panics if `tgs` is the identity point.
 #[must_use]
-pub(crate) fn anchor_next_stamp(anchor_prev: Fp, epoch: Fp, tgs: EqAffine) -> Fp {
+pub fn anchor_next_stamp(anchor_prev: Fp, epoch: Fp, tgs: EqAffine) -> Fp {
     let (tgs_lo, tgs_hi) = point_limbs(tgs);
     hash::<5>([
         Fp::from_u128(u128::from_le_bytes(*ANCHOR_STAMP_DOMAIN)),
@@ -156,7 +157,7 @@ const ANCHOR_EPOCH_DOMAIN: &[u8; 16] = b"Tachyon-AnchorEp";
 
 /// Advances the terminal anchor of an epoch into a new epoch's initial state.
 #[must_use]
-pub(crate) fn anchor_next_epoch(anchor_prev: Fp, new_epoch: Fp) -> Fp {
+pub fn anchor_next_epoch(anchor_prev: Fp, new_epoch: Fp) -> Fp {
     hash::<3>([
         Fp::from_u128(u128::from_le_bytes(*ANCHOR_EPOCH_DOMAIN)),
         anchor_prev,

@@ -8,7 +8,11 @@ pub const BLOCK_MAX: u32 = u32::MAX;
 
 /// Number of blocks per epoch. Must be a power of two (block-height
 /// arithmetic derives its shift and mask from this value).
-pub const EPOCH_SIZE: u32 = 1 << { if cfg!(test) { 4 } else { 12 } };
+pub const EPOCH_SIZE: u32 = if cfg!(feature = "test-epoch-size") {
+    64
+} else {
+    4096
+};
 
 /// Maximum epoch index: every block height maps to an epoch.
 #[expect(

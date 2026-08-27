@@ -1,26 +1,35 @@
-#![allow(clippy::panic, clippy::too_many_lines, reason = "test code")]
+extern crate alloc;
 
-use alloc::{boxed::Box, string::ToString as _, vec, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, BTreeSet},
+    string::ToString as _,
+    vec,
+    vec::Vec,
+};
 use core::cmp::Reverse;
 
+use corez::io;
 use group::Group as _;
 use pasta_curves::{Eq, Fp};
 use ragu::proof::PROOF_SIZE_COMPRESSED;
 use rand::{SeedableRng as _, rngs::StdRng};
-
-use super::*;
-use crate::{
+use zcash_tachyon::{
+    BlockHeight, SignatureError, Tachygram, TachygramSetPoly, action,
+    bundle::{Plan, PlanError, Signature},
     constants::{EPOCH_SIZE, MAX_MONEY},
     digest::blake2b::{COMMIT_NO_BUNDLE, action_descriptor_digest, bundle_commitment, memo_digest},
+    effect,
     entropy::ActionEntropy,
-    fixtures::{
-        PoolSim, WalletSim, build_autonome, build_output_plan, build_output_stamp,
-        forge_overlapping_merge, mock_sighash, mock_wtxid, random_block, random_block_with,
-        shared_sk, spend_witness,
-    },
-    primitives::{BlockHeight, Tachygram, TachygramSetPoly},
-    stamp::ProveError,
-    value,
+    keys::private,
+    stamp::{PointerStamp, ProofStamp, ProveError},
+    value, *,
+};
+
+use crate::fixtures::{
+    PoolSim, WalletSim, build_autonome, build_output_plan, build_output_stamp,
+    forge_overlapping_merge, mock_sighash, mock_wtxid, random_block, random_block_with, shared_sk,
+    spend_witness,
 };
 
 #[test]
@@ -47,26 +56,6 @@ fn wrong_value_balance_fails_verification() {
     let sighash = mock_sighash(bundle.commitment());
 
     bundle.value_balance = value::Balance::try_from(999).unwrap();
-    let err = bundle.verify_signatures(&sighash).unwrap_err();
-    let SignatureError::Binding(_) = err else {
-        panic!("expected SignatureError::Binding, got {err:?}");
-    };
-}
-
-/// No separate range assertion is needed in `verify_signatures`: even a
-/// `value::Balance` built directly with a magnitude far outside
-/// `-MAX_MONEY..=MAX_MONEY` (bypassing `TryFrom`'s range check entirely, the
-/// same way `read_rejects_value_balance_out_of_range` forges an otherwise
-/// unconstructible wire encoding) is caught by the binding signature check
-/// alone, same as any other mismatched value.
-#[test]
-fn verify_signatures_rejects_out_of_range_value_balance_mutation() {
-    let rng = &mut StdRng::seed_from_u64(0);
-    let wallet = WalletSim::new(shared_sk());
-    let mut bundle = build_autonome(rng, &wallet, 1000, 700);
-    let sighash = mock_sighash(bundle.commitment());
-
-    bundle.value_balance = value::Balance::new_unchecked(i64::MAX);
     let err = bundle.verify_signatures(&sighash).unwrap_err();
     let SignatureError::Binding(_) = err else {
         panic!("expected SignatureError::Binding, got {err:?}");
@@ -1040,9 +1029,16 @@ fn based_aggregate_with_two_adjuncts() {
     // A corrupted action signature is caught by `verify_signatures`, not `verify`.
     {
         let mut tampered = becomes_based.clone();
-        let mut sig_bytes: [u8; 64] = tampered.actions[0].sig.0.into();
+
+        let mut sig_bytes: Vec<u8> = [0; 64].to_vec();
+        tampered.actions[0]
+            .sig
+            .write(&mut sig_bytes)
+            .expect("write");
+
         sig_bytes[0] ^= 0xFF;
-        tampered.actions[0].sig = action::Signature(sig_bytes.into());
+        tampered.actions[0].sig = action::Signature::read(&mut sig_bytes.as_slice()).expect("read");
+
         let err = tampered
             .verify_signatures(&sighash)
             .expect_err("a corrupted action signature must fail signature verification");
@@ -1072,9 +1068,10 @@ fn autonome_verify_composes_all_checks() {
         .expect("honest autonome bundle verifies");
 
     let mut tampered = bundle.clone();
-    let mut sig_bytes: [u8; 64] = tampered.binding_sig.0.into();
+    let mut sig_bytes: Vec<u8> = Vec::new();
+    tampered.binding_sig.write(&mut sig_bytes).expect("write");
     sig_bytes[0] ^= 0xFF;
-    tampered.binding_sig = Signature(sig_bytes.into());
+    tampered.binding_sig = Signature::read(&mut sig_bytes.as_slice()).expect("read");
 
     let err = tampered
         .verify_signatures(&sighash)
@@ -1091,9 +1088,10 @@ fn invalid_action_sig_fails_verification() {
     let mut bundle = build_autonome(rng, &wallet, 1000, 700);
     let sighash = mock_sighash(bundle.commitment());
 
-    let mut sig_bytes: [u8; 64] = bundle.actions[0].sig.0.into();
+    let mut sig_bytes: Vec<u8> = Vec::new();
+    bundle.actions[0].sig.write(&mut sig_bytes).expect("write");
     sig_bytes[0] ^= 0xFF;
-    let bad_sig = action::Signature(sig_bytes.into());
+    let bad_sig = action::Signature::read(&mut sig_bytes.as_slice()).expect("read");
     bundle.actions[0].sig = bad_sig;
 
     let err = bundle.verify_signatures(&sighash).unwrap_err();
@@ -1775,7 +1773,7 @@ fn read_rejects_value_balance_out_of_range() {
     let wallet = WalletSim::new(shared_sk());
     let max_money = i64::try_from(MAX_MONEY).unwrap();
 
-    for value_balance in [max_money + 1, -max_money - 1] {
+    for value_balance in [max_money + 1, -max_money - 1, i64::MAX, i64::MIN] {
         let bundle = build_autonome(rng, &wallet, 1000, 700);
 
         let mut buf = Vec::new();

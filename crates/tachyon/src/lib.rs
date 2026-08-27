@@ -19,9 +19,9 @@ pub mod keys;
 pub mod note;
 pub mod nullifier;
 pub mod reddsa;
+pub mod spend_proof;
 pub mod stamp;
 pub mod value;
-pub mod wallet;
 pub mod witness;
 
 mod digest;

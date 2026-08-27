@@ -1,4 +1,4 @@
-//! Wallet-side helpers for proving spends of Tachyon notes.
+//! Helpers for constructing Tachyon spend proofs.
 
 extern crate alloc;
 
@@ -22,7 +22,7 @@ use crate::{
 ///
 /// Pass these inputs to [`crate::StampPlan::prove`] in the same order as the
 /// spend actions in the bundle plan.
-pub type SpendProofInputs = (
+pub type Inputs = (
     Pcd<delegation::NullifierHeader>,
     Pcd<spendable::SpendableHeader>,
 );
@@ -36,13 +36,13 @@ pub type SpendProofInputs = (
 ///
 /// Notes spent in a later epoch must first have their spendable proof lifted
 /// across the intervening anchor and nullifier-exclusion history.
-pub fn spend_inputs_for_created_note<RNG: CryptoRng>(
+pub fn inputs_for_created_note<RNG: CryptoRng>(
     rng: &mut RNG,
     note: &Note,
     pak: &ProofAuthorizingKey,
     creation_stamp: &ProofStamp,
     epoch: EpochIndex,
-) -> Result<SpendProofInputs, ragu::Error> {
+) -> Result<Inputs, ragu::Error> {
     if !creation_stamp
         .tachygrams
         .contains(&note.commitment().into())
@@ -183,7 +183,7 @@ mod tests {
             .anchor
             .next_stamp(epoch, &creation_stamp.tachygram_set)
             .expect("test stamp advances the anchor");
-        let inputs = spend_inputs_for_created_note(rng, &note, &wallet.pak, &creation_stamp, epoch)
+        let inputs = inputs_for_created_note(rng, &note, &wallet.pak, &creation_stamp, epoch)
             .expect("created note has spend proof inputs");
         let theta = ActionEntropy::random(rng);
         let spend = action::Plan::<effect::Spend>::spend(

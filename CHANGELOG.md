@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `wallet::spend_inputs_for_created_note` for constructing the private
+  proof inputs needed to spend a note in its creation epoch.
+
 ## [0.0.0] - 2026-02-16
 
 ### Added

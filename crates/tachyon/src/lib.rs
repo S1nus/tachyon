@@ -21,6 +21,7 @@ pub mod nullifier;
 pub mod reddsa;
 pub mod stamp;
 pub mod value;
+pub mod wallet;
 pub mod witness;
 
 mod digest;

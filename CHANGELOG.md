@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added `wallet::spend_inputs_for_created_note` for constructing the private
   proof inputs needed to spend a note in its creation epoch.
+- Added `Tachygram::to_bytes` for accessing its canonical encoding without
+  depending on Tachyon's field implementation.
 
 ## [0.0.0] - 2026-02-16
 

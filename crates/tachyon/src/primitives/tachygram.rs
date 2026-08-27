@@ -23,6 +23,12 @@ use rand_core::CryptoRng;
 pub struct Tachygram(Fp);
 
 impl Tachygram {
+    /// Return the canonical little-endian encoding of this tachygram.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; 32] {
+        self.0.to_repr()
+    }
+
     #[cfg(test)]
     pub(crate) fn random<RNG: CryptoRng>(rng: &mut RNG) -> Self {
         use ff::Field as _;

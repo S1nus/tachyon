@@ -3,7 +3,7 @@
 //! Each named function provides one protocol-defined hash.
 
 use ff::PrimeField as _;
-use group::{GroupEncoding as _, prime::PrimeCurveAffine as _};
+use group::{CurveAffine as _, GroupEncoding as _};
 use pasta_curves::{EpAffine, EqAffine, Fp, arithmetic::Coordinates};
 use ragu::Sponge;
 

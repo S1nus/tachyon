@@ -13,7 +13,7 @@ use ff::Field as _;
 use pasta_curves::Fp;
 use ragu::{Pcd, Proof};
 use rand::{SeedableRng as _, rngs::StdRng};
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 use super::{PROOF_SYSTEM, delegation, output, pool, spend, spendable, stamp};
 use crate::{
@@ -37,8 +37,8 @@ fn mine_cm_block(rng: &mut StdRng, pool: &mut PoolSim, cm: note::Commitment) -> 
     pool.height()
 }
 
-fn mine_cm_in_epoch_one(
-    rng: &mut (impl RngCore + CryptoRng),
+fn mine_cm_in_epoch_one<RNG: CryptoRng>(
+    rng: &mut RNG,
     pool: &mut PoolSim,
     cm: note::Commitment,
 ) -> BlockHeight {
@@ -117,7 +117,7 @@ fn stamp_lift_within_epoch() {
     let mut pool = PoolSim::genesis(rng);
 
     pool.advance(1, |_| random_block(rng, 1, 4));
-    let stamp_anchor = pool.anchor_at(BlockHeight(1));
+    let stamp_anchor = pool.block(BlockHeight(1)).anchor();
 
     let note = user.random_note(200);
     let (stamp, plan) = build_output_stamp(rng, stamp_anchor, note);
@@ -260,7 +260,7 @@ fn anchor_chain_fuse_rejects_invalid_compositions() {
         let left = build_anchor_chain_pcd(rng, &pool, BlockHeight(0)..=BlockHeight(0));
 
         let bogus_start = Anchor(Fp::random(&mut *rng));
-        let stamps = pool.tachygrams_at(BlockHeight(1));
+        let stamps = pool.block(BlockHeight(1)).tachygrams();
         let (right, ()) = PROOF_SYSTEM
             .seed(
                 rng,
@@ -317,8 +317,14 @@ fn empty_blocks_do_not_advance_the_anchor() {
     pool.mine(vec![]);
 
     let stamped = BlockHeight(1);
-    assert_eq!(pool.anchor_at(BlockHeight(2)), pool.anchor_at(stamped));
-    assert_eq!(pool.anchor_at(BlockHeight(3)), pool.anchor_at(stamped));
+    assert_eq!(
+        pool.block(BlockHeight(2)).anchor(),
+        pool.block(stamped).anchor()
+    );
+    assert_eq!(
+        pool.block(BlockHeight(3)).anchor(),
+        pool.block(stamped).anchor()
+    );
 }
 
 #[test]
@@ -340,7 +346,7 @@ fn spendable_stays_current_across_empty_blocks() {
     pool.mine(vec![]);
     pool.mine(vec![]);
 
-    assert_eq!(pool.anchor_at(pool.height()), spendable_anchor);
+    assert_eq!(pool.block(pool.height()).anchor(), spendable_anchor);
 }
 
 #[test]
@@ -611,7 +617,7 @@ fn spend_after_lift_publishes_anchor_epoch_nullifiers() {
         start_anchor,
     );
     let unspent = sync.build_next_unspent(rng, 0, &pool, target_height);
-    let lifted = user.lift(rng, spendable, unspent, &note, EpochIndex(0), EpochIndex(1));
+    let lifted = user.lift(rng, spendable, unspent, &note);
 
     let spend_pcd = honest_spend_bind(rng, &user, &note, lifted, EpochIndex(1));
     let (_cm, present_nf, _nf_next, _anchor) = *spend_pcd.data();
@@ -713,7 +719,7 @@ fn sync_sim_builds_unspent_for_wallet_lift_across_epochs() {
     let unspent = sync.build_next_unspent(rng, 0, &pool, target_height);
     assert_eq!(sync.consumed(0), 1);
 
-    let lifted = user.lift(rng, spendable, unspent, &note, EpochIndex(0), EpochIndex(1));
+    let lifted = user.lift(rng, spendable, unspent, &note);
 
     assert_eq!(
         lifted.data().1,
@@ -722,7 +728,7 @@ fn sync_sim_builds_unspent_for_wallet_lift_across_epochs() {
     );
     assert_eq!(
         lifted.data().2,
-        pool.anchor_at(target_height),
+        pool.block(target_height).anchor(),
         "anchor advanced"
     );
     assert_eq!(lifted.data().0, note.commitment(), "cm threaded unchanged");
@@ -776,7 +782,7 @@ fn unspent_lift_spans_partial_and_whole_epochs() {
         "three epoch crossings (0 -> 1 -> 2 -> 3)"
     );
 
-    let lifted = user.lift(rng, spendable, unspent, &note, EpochIndex(0), EpochIndex(3));
+    let lifted = user.lift(rng, spendable, unspent, &note);
     assert_eq!(
         lifted.data().1,
         (EpochIndex(3), user.nf_at(&note, EpochIndex(3))),
@@ -784,7 +790,7 @@ fn unspent_lift_spans_partial_and_whole_epochs() {
     );
     assert_eq!(
         lifted.data().2,
-        pool.anchor_at(target_height),
+        pool.block(target_height).anchor(),
         "anchor advanced to the mid-epoch-3 target"
     );
     assert_eq!(lifted.data().0, note.commitment(), "cm threaded unchanged");
@@ -816,22 +822,28 @@ fn multi_epoch_fuse_setup(
     let junction_height = BlockHeight(2 * EPOCH_SIZE + 2);
     let end_height = BlockHeight(3 * EPOCH_SIZE + 2);
     let start = pool
-        .prev_anchor_at(start_height)
+        .block(start_height)
+        .prev
         .next_stamp(
             start_height.epoch(),
-            &pool.stamp_commits_at(start_height)[0],
+            &pool.block(start_height).stamp_commits()[0],
         )
         .unwrap();
     let junction = pool
-        .prev_anchor_at(junction_height)
+        .block(junction_height)
+        .prev
         .next_stamp(
             junction_height.epoch(),
-            &pool.stamp_commits_at(junction_height)[0],
+            &pool.block(junction_height).stamp_commits()[0],
         )
         .unwrap();
     let end = pool
-        .prev_anchor_at(end_height)
-        .next_stamp(end_height.epoch(), &pool.stamp_commits_at(end_height)[0])
+        .block(end_height)
+        .prev
+        .next_stamp(
+            end_height.epoch(),
+            &pool.block(end_height).stamp_commits()[0],
+        )
         .unwrap();
     let left = build_unspent_pcd_between_anchors(rng, &pool, &[nf0, nf1, nf2], (start, junction));
     let right = build_unspent_pcd_between_anchors(rng, &pool, &[nf2, nf3], (junction, end));
@@ -1019,27 +1031,32 @@ fn epoch_fuse_setup(
     let start_height = BlockHeight(2);
     let end_height = BlockHeight(4 * EPOCH_SIZE + 2);
     let start = pool
-        .prev_anchor_at(start_height)
+        .block(start_height)
+        .prev
         .next_stamp(
             start_height.epoch(),
-            &pool.stamp_commits_at(start_height)[0],
+            &pool.block(start_height).stamp_commits()[0],
         )
         .unwrap();
     let end = pool
-        .prev_anchor_at(end_height)
-        .next_stamp(end_height.epoch(), &pool.stamp_commits_at(end_height)[0])
+        .block(end_height)
+        .prev
+        .next_stamp(
+            end_height.epoch(),
+            &pool.block(end_height).stamp_commits()[0],
+        )
         .unwrap();
     let left = build_unspent_pcd_between_anchors(
         rng,
         &pool,
         &nf[..3],
-        (start, pool.anchor_at(BlockHeight(3 * EPOCH_SIZE - 1))),
+        (start, pool.block(BlockHeight(3 * EPOCH_SIZE - 1)).anchor()),
     );
     let right = build_unspent_pcd_between_anchors(
         rng,
         &pool,
         &nf[3..],
-        (pool.prev_anchor_at(BlockHeight(3 * EPOCH_SIZE)), end),
+        (pool.block(BlockHeight(3 * EPOCH_SIZE)).prev, end),
     );
     assert_eq!(left.data().0, start, "left rooted at the sub-block start");
     assert_eq!(right.data().4, end, "right ends at the sub-block end");
@@ -1155,7 +1172,7 @@ fn spendable_lift_advances_from_an_epoch_tip() {
     let epoch0_tip = spendable.data().2;
     assert_eq!(
         epoch0_tip,
-        pool.pre_epoch_anchor(EpochIndex(1)),
+        pool.block(EpochIndex(0).last_block()).anchor(),
         "the lineage sits on the epoch tip"
     );
 
@@ -1178,14 +1195,7 @@ fn spendable_lift_advances_from_an_epoch_tip() {
             ),
         )
         .expect("EndEpochUnspentSeed");
-    let at_boundary = user.lift(
-        rng,
-        spendable,
-        crossing,
-        &note,
-        EpochIndex(0),
-        EpochIndex(1),
-    );
+    let at_boundary = user.lift(rng, spendable, crossing, &note);
     assert_eq!(
         *at_boundary.data(),
         (
@@ -1201,22 +1211,15 @@ fn spendable_lift_advances_from_an_epoch_tip() {
         rng,
         &pool,
         &[user.nf_at(&note, EpochIndex(1))],
-        (at_boundary.data().2, pool.anchor_at(target_height)),
+        (at_boundary.data().2, pool.block(target_height).anchor()),
     );
-    let lifted = user.lift(
-        rng,
-        at_boundary,
-        arbitrary,
-        &note,
-        EpochIndex(1),
-        EpochIndex(1),
-    );
+    let lifted = user.lift(rng, at_boundary, arbitrary, &note);
 
     assert_eq!(
         lifted.data().1,
         (EpochIndex(1), user.nf_at(&note, EpochIndex(1)))
     );
-    assert_eq!(lifted.data().2, pool.anchor_at(target_height));
+    assert_eq!(lifted.data().2, pool.block(target_height).anchor());
 }
 
 /// A span opening on a boundary anchor covers the crossings after it, not the
@@ -1249,14 +1252,7 @@ fn unspent_span_starting_on_a_boundary_anchor() {
             ),
         )
         .expect("EndEpochUnspentSeed");
-    let at_boundary = user.lift(
-        rng,
-        spendable,
-        crossing,
-        &note,
-        EpochIndex(0),
-        EpochIndex(1),
-    );
+    let at_boundary = user.lift(rng, spendable, crossing, &note);
 
     // Epoch 1 publishes nothing, so the span starts on a boundary anchor whose
     // own epoch is silent; epoch 2 resumes.
@@ -1268,7 +1264,10 @@ fn unspent_span_starting_on_a_boundary_anchor() {
     assert_eq!(target_height.epoch(), EpochIndex(2));
 
     let start_anchor = at_boundary.data().2;
-    assert_eq!(start_anchor, pool.pre_epoch_anchor(EpochIndex(2)));
+    assert_eq!(
+        start_anchor,
+        pool.block(EpochIndex(1).last_block()).anchor()
+    );
     let arbitrary = build_unspent_pcd_between_anchors(
         rng,
         &pool,
@@ -1276,7 +1275,7 @@ fn unspent_span_starting_on_a_boundary_anchor() {
             user.nf_at(&note, EpochIndex(1)),
             user.nf_at(&note, EpochIndex(2)),
         ],
-        (start_anchor, pool.anchor_at(target_height)),
+        (start_anchor, pool.block(target_height).anchor()),
     );
     let (_, (epoch_start, _), elapsed, (epoch_end, _), _) = *arbitrary.data();
     assert_eq!(epoch_start, EpochIndex(1));
@@ -1287,19 +1286,12 @@ fn unspent_span_starting_on_a_boundary_anchor() {
         "only the crossing out of the silent epoch, not the one into it"
     );
 
-    let lifted = user.lift(
-        rng,
-        at_boundary,
-        arbitrary,
-        &note,
-        EpochIndex(1),
-        EpochIndex(2),
-    );
+    let lifted = user.lift(rng, at_boundary, arbitrary, &note);
     assert_eq!(
         lifted.data().1,
         (EpochIndex(2), user.nf_at(&note, EpochIndex(2)))
     );
-    assert_eq!(lifted.data().2, pool.anchor_at(target_height));
+    assert_eq!(lifted.data().2, pool.block(target_height).anchor());
 }
 
 /// A span may end on a boundary anchor: an epoch that has published nothing
@@ -1323,10 +1315,8 @@ fn unspent_span_ending_on_a_boundary_anchor() {
     let target_height = pool.height();
     assert_eq!(target_height.epoch(), EpochIndex(1));
     assert_eq!(
-        pool.anchor_at(target_height),
-        pool.pre_epoch_anchor(EpochIndex(1))
-            .next_epoch(EpochIndex(1))
-            .unwrap(),
+        pool.block(target_height).anchor(),
+        pool.block(EpochIndex(1).first_block()).anchor(),
         "a silent epoch-first block rests on the boundary anchor"
     );
 
@@ -1337,30 +1327,23 @@ fn unspent_span_ending_on_a_boundary_anchor() {
             user.nf_at(&note, EpochIndex(0)),
             user.nf_at(&note, EpochIndex(1)),
         ],
-        (spendable.data().2, pool.anchor_at(target_height)),
+        (spendable.data().2, pool.block(target_height).anchor()),
     );
     let (_, (epoch_start, _), elapsed, (epoch_end, _), anchor_last) = *arbitrary.data();
     assert_eq!(epoch_start, EpochIndex(0));
     assert_eq!(epoch_end, EpochIndex(1), "the span stops on the crossing");
-    assert_eq!(anchor_last, pool.anchor_at(target_height));
+    assert_eq!(anchor_last, pool.block(target_height).anchor());
     assert_eq!(
         elapsed,
         NfSeqPoly::from_iter([user.nf_at(&note, EpochIndex(0))]).commit()
     );
 
-    let lifted = user.lift(
-        rng,
-        spendable,
-        arbitrary,
-        &note,
-        EpochIndex(0),
-        EpochIndex(1),
-    );
+    let lifted = user.lift(rng, spendable, arbitrary, &note);
     assert_eq!(
         lifted.data().1,
         (EpochIndex(1), user.nf_at(&note, EpochIndex(1)))
     );
-    assert_eq!(lifted.data().2, pool.anchor_at(target_height));
+    assert_eq!(lifted.data().2, pool.block(target_height).anchor());
 }
 
 /// A stampless epoch is two crossings with nothing between them, so the span
@@ -1394,7 +1377,7 @@ fn end_epoch_unspent_seed_crosses_a_stampless_epoch() {
             user.nf_at(&note, EpochIndex(1)),
             user.nf_at(&note, EpochIndex(2)),
         ],
-        (spendable.data().2, pool.anchor_at(target_height)),
+        (spendable.data().2, pool.block(target_height).anchor()),
     );
     let (_, (epoch_start, _), elapsed, (epoch_end, _), _) = *arbitrary.data();
     assert_eq!(epoch_start, EpochIndex(0));
@@ -1409,19 +1392,12 @@ fn end_epoch_unspent_seed_crosses_a_stampless_epoch() {
         "both crossings recorded, including the one over the silent epoch"
     );
 
-    let lifted = user.lift(
-        rng,
-        spendable,
-        arbitrary,
-        &note,
-        EpochIndex(0),
-        EpochIndex(2),
-    );
+    let lifted = user.lift(rng, spendable, arbitrary, &note);
     assert_eq!(
         lifted.data().1,
         (EpochIndex(2), user.nf_at(&note, EpochIndex(2)))
     );
-    assert_eq!(lifted.data().2, pool.anchor_at(target_height));
+    assert_eq!(lifted.data().2, pool.block(target_height).anchor());
 }
 
 #[test]
@@ -1769,7 +1745,7 @@ fn spendable_lift_rejects_wrong_cm() {
         pool.advance(1, |_| random_block(rng, 1, 2));
     }
     let arbitrary = sync.build_next_unspent(rng, 0, &pool, target_height);
-    let unspent = user.unspent_bind(rng, arbitrary, &phantom, EpochIndex(0), EpochIndex(1));
+    let unspent = user.unspent_bind(rng, arbitrary, &phantom);
 
     let err = PROOF_SYSTEM
         .fuse(rng, spendable::SpendableLift, (), spendable, unspent)
@@ -1871,7 +1847,7 @@ fn spendable_lift_rejects_non_adjacent_unspent() {
         &[user.nf_at(&note, EpochIndex(0))],
         init_height..=init_height,
     );
-    let unspent = user.unspent_bind(rng, arbitrary, &note, EpochIndex(0), EpochIndex(0));
+    let unspent = user.unspent_bind(rng, arbitrary, &note);
 
     let err = PROOF_SYSTEM
         .fuse(rng, spendable::SpendableLift, (), spendable, unspent)

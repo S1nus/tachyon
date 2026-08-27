@@ -42,7 +42,7 @@ impl ActionDigest {
 
 #[cfg(test)]
 mod tests {
-    use rand::{CryptoRng, RngCore, SeedableRng as _, rngs::StdRng};
+    use rand::{CryptoRng, SeedableRng as _, rngs::StdRng};
 
     use super::*;
     use crate::{
@@ -54,7 +54,7 @@ mod tests {
         value,
     };
 
-    fn make_action_parts<RNG: RngCore + CryptoRng>(
+    fn make_action_parts<RNG: CryptoRng>(
         rng: &mut RNG,
         val: u64,
     ) -> (value::Commitment, public::ActionVerificationKey) {

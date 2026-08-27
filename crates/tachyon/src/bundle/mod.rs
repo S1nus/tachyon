@@ -89,7 +89,7 @@ use core::{cmp::Ordering, ops::Neg as _};
 
 use corez::io::{self, Read, Write};
 use derive_more::{Debug, Display, Eq as TotalEq, Error, From, IsVariant, PartialEq, TryInto};
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 use crate::{
     ActionDigest, ActionDigestError, TachygramSetCommit,
@@ -458,7 +458,7 @@ impl Plan {
     ///
     /// To confirm correct application, call [`Bundle::verify_signatures`] on
     /// the return value.
-    pub fn sign<RNG: RngCore + CryptoRng>(
+    pub fn sign<RNG: CryptoRng>(
         &self,
         rng: &mut RNG,
         sighash: &[u8; 32],
@@ -488,7 +488,7 @@ impl Plan {
     ///
     /// To confirm correct application, call [`Bundle::verify_signatures`] on
     /// the return value.
-    pub fn apply_signatures<RNG: RngCore + CryptoRng>(
+    pub fn apply_signatures<RNG: CryptoRng>(
         &self,
         rng: &mut RNG,
         sighash: &[u8; 32],
@@ -549,7 +549,7 @@ impl Bundle<ProofStamp> {
     ///
     /// If you fail to use the correct sequence according to consensus, you will
     /// succesesfully lift to an anchor that consensus does not recognize.
-    pub fn lift<RNG: RngCore + CryptoRng>(
+    pub fn lift<RNG: CryptoRng>(
         self,
         rng: &mut RNG,
         adjuncts: &[&Bundle<dyn StampState>],
@@ -661,7 +661,7 @@ impl Bundle<ProofStamp> {
 
     /// Verify the stamp's proof against the combined actions of this bundle and
     /// the provided bundles.
-    pub fn verify_proof<RNG: RngCore + CryptoRng>(
+    pub fn verify_proof<RNG: CryptoRng>(
         &self,
         rng: &mut RNG,
         adjuncts: &[&Bundle<dyn StampState>],
@@ -685,7 +685,7 @@ impl Bundle<ProofStamp> {
     /// Verify the proof stamp with given adjuncts.
     ///
     /// Verification of signatures remains the responsibility of the caller.
-    pub fn verify<RNG: RngCore + CryptoRng>(
+    pub fn verify<RNG: CryptoRng>(
         &self,
         rng: &mut RNG,
         wtxid: &[u8; 64],

@@ -4,7 +4,7 @@ use derive_more::{Debug, Eq as TotalEq, From, Into, PartialEq};
 use ff::PrimeField as _;
 use pasta_curves::Fp;
 #[cfg(test)]
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 /// A field element ($\mathbb{F}_p$) in the Tachyon polynomial accumulator.
 ///
@@ -24,7 +24,7 @@ pub struct Tachygram(Fp);
 
 impl Tachygram {
     #[cfg(test)]
-    pub(crate) fn random<RNG: RngCore + CryptoRng>(rng: &mut RNG) -> Self {
+    pub(crate) fn random<RNG: CryptoRng>(rng: &mut RNG) -> Self {
         use ff::Field as _;
 
         Self(Fp::random(rng))

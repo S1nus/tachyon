@@ -28,20 +28,22 @@ impl From<usize> for BlockHeight {
 impl BlockHeight {
     /// Returns the next block height.
     #[must_use]
-    pub fn next(self) -> Option<Self> {
-        self.0.checked_add(1).map(Self)
+    pub const fn next(self) -> Self {
+        #[expect(clippy::expect_used, reason = "don't go above u32::MAX")]
+        Self(self.0.checked_add(1).expect("do not exceed u32::MAX"))
     }
 
     /// Returns the previous block height.
     #[must_use]
-    pub fn prev(self) -> Option<Self> {
-        self.0.checked_sub(1).map(Self)
+    pub const fn prev(self) -> Self {
+        #[expect(clippy::expect_used, reason = "don't go below u32::MIN")]
+        Self(self.0.checked_sub(1).expect("do not subceed u32::MIN"))
     }
 
     /// Epoch index for this block height.
     #[must_use]
     pub const fn epoch(self) -> EpochIndex {
-        EpochIndex(self.0 >> EPOCH_SIZE.ilog2())
+        EpochIndex(self.0.div_euclid(EPOCH_SIZE))
     }
 
     /// Whether this is the last block of its epoch.

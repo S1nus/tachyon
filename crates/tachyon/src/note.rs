@@ -37,7 +37,7 @@
 use derive_more::{Debug, Eq as TotalEq, From, Into, PartialEq};
 use ff::Field as _;
 use pasta_curves::Fp;
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 use crate::{digest::poseidon, keys::PaymentKey, nullifier, primitives::Tachygram, value};
 
@@ -50,7 +50,7 @@ pub struct CommitmentTrapdoor(#[debug(skip)] Fp);
 
 impl CommitmentTrapdoor {
     /// Generate a fresh random trapdoor.
-    pub fn random<RNG: RngCore + CryptoRng>(rng: &mut RNG) -> Self {
+    pub fn random<RNG: CryptoRng>(rng: &mut RNG) -> Self {
         Self(Fp::random(rng))
     }
 }

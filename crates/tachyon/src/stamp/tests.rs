@@ -70,7 +70,7 @@ fn plan_prove_rejects_invalid_inputs() {
         50,
     ));
     let height = pool.height();
-    let anchor = pool.anchor_at(height);
+    let anchor = pool.block(height).anchor();
     let spend_epoch = height.epoch();
 
     let sp_a = user.fresh_spend(rng, &pool, height, &note_a);
@@ -301,9 +301,9 @@ fn double_spend_cannot_aggregate() {
 
     // Two spendable lineages for the SAME note produce identical nullifiers.
     let init_a = wallet.spendable_init(rng, &spend, &pool, cm_height);
-    let sp_a = wallet.lift_over_creation_epoch(rng, &pool, &spend, cm_height, init_a);
+    let sp_a = wallet.lift_to_epoch(rng, &pool, &spend, init_a, cm_height.epoch().next());
     let init_b = wallet.spendable_init(rng, &spend, &pool, cm_height);
-    let sp_b = wallet.lift_over_creation_epoch(rng, &pool, &spend, cm_height, init_b);
+    let sp_b = wallet.lift_to_epoch(rng, &pool, &spend, init_b, cm_height.epoch().next());
     let anchor = sp_a.data().2;
     assert_eq!(anchor, sp_b.data().2, "same-note lifts share an anchor");
 
@@ -736,14 +736,14 @@ fn lift_advances_a_stamp_anchor() {
 
     pool.advance(2, |_| random_block(rng, 1, 4));
     let lifted_to = pool.height();
-    let chain = build_anchor_chain_pcd(rng, &pool, stamped_at.next().expect("next")..=lifted_to);
+    let chain = build_anchor_chain_pcd(rng, &pool, stamped_at.next()..=lifted_to);
 
     let before = stamp.clone();
     let lifted = stamp
         .prove_lift(rng, [], chain)
         .expect("lift over a within-epoch segment");
 
-    assert_eq!(lifted.anchor, pool.anchor_at(lifted_to));
+    assert_eq!(lifted.anchor, pool.block(lifted_to).anchor());
     assert_eq!(lifted.coverage, before.coverage);
     assert_eq!(lifted.tachygram_set, before.tachygram_set);
     assert_eq!(lifted.tachygrams, before.tachygrams);
@@ -764,8 +764,7 @@ fn lift_then_verify() {
     let digest = plan.digest().expect("valid plan");
 
     pool.advance(2, |_| random_block(rng, 1, 4));
-    let chain =
-        build_anchor_chain_pcd(rng, &pool, stamped_at.next().expect("next")..=pool.height());
+    let chain = build_anchor_chain_pcd(rng, &pool, stamped_at.next()..=pool.height());
 
     let lifted = stamp.prove_lift(rng, [digest], chain).expect("lift");
 
@@ -795,7 +794,7 @@ fn lift_over_descriptors_then_verify() {
     pool.advance(2, |_| random_block(rng, 1, 4));
     let epoch = pool.height().epoch();
     let following_stamps = (stamped_at.0 + 1..=pool.height().0)
-        .flat_map(|height| pool.stamp_commits_at(BlockHeight(height)))
+        .flat_map(|height| pool.block(BlockHeight(height)).stamp_commits())
         .scan(stamp.anchor, |anchor_before, tachygram_set| {
             let witness = (*anchor_before, epoch, tachygram_set);
             *anchor_before = anchor_before.next_stamp(epoch, &tachygram_set).unwrap();
@@ -851,8 +850,7 @@ fn lift_rejects_wrong_digests() {
     let foreign_digest = random_action(rng).digest().expect("valid action");
 
     pool.advance(2, |_| random_block(rng, 1, 4));
-    let chain =
-        build_anchor_chain_pcd(rng, &pool, stamped_at.next().expect("next")..=pool.height());
+    let chain = build_anchor_chain_pcd(rng, &pool, stamped_at.next()..=pool.height());
 
     let lifted = stamp
         .prove_lift(rng, [foreign_digest], chain)
@@ -895,7 +893,7 @@ fn merge_after_lift() {
     )
     .expect_err("mismatched anchors must not merge");
 
-    let chain = build_anchor_chain_pcd(rng, &pool, height_a.next().expect("next")..=height_b);
+    let chain = build_anchor_chain_pcd(rng, &pool, height_a.next()..=height_b);
     let lifted_a = stamp_a
         .prove_lift(rng, [plan_a.digest().expect("valid plan")], chain)
         .expect("lift onto the later anchor");

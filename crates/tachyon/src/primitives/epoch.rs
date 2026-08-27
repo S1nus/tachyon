@@ -3,6 +3,9 @@ use core::ops;
 use derive_more::{Debug, Eq as TotalEq, From, Into, PartialEq};
 use pasta_curves::Fp;
 
+use super::BlockHeight;
+use crate::constants::EPOCH_SIZE;
+
 /// A tachyon epoch — a point in the accumulator's history.
 ///
 /// The tachyon accumulator evolves as tachygrams are included. Each
@@ -24,6 +27,18 @@ impl EpochIndex {
     #[must_use]
     pub const fn next(self) -> Self {
         Self(self.0 + 1)
+    }
+
+    /// Returns the first block height of the epoch.
+    #[must_use]
+    pub const fn first_block(self) -> BlockHeight {
+        BlockHeight(self.0 * EPOCH_SIZE)
+    }
+
+    /// Returns the last block height of the epoch.
+    #[must_use]
+    pub const fn last_block(self) -> BlockHeight {
+        BlockHeight(self.next().first_block().0 - 1)
     }
 }
 

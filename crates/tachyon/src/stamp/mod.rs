@@ -19,7 +19,7 @@ use proof::{
     stamp::{MergeStamp, OutputStamp, SpendStamp, StampHeader, StampLift},
 };
 use ragu::{self, proof::PROOF_SIZE_COMPRESSED};
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 use crate::{
     ActionSetPoly, Note, TachygramSetPoly, action,
@@ -340,7 +340,7 @@ impl Plan {
     ///
     /// TODO: nf_next parameter may need to come back
     /// TODO: provide a way to lift spend stamps when necessary to merge
-    pub fn prove<RNG: RngCore + CryptoRng>(
+    pub fn prove<RNG: CryptoRng>(
         self,
         rng: &mut RNG,
         pak: &ProofAuthorizingKey,
@@ -512,7 +512,7 @@ impl ProofStamp {
     /// [`output::OutputBind`] settles the tachygram pair, then [`OutputStamp`]
     /// proves the action over it. Both tachygrams are derived inside the
     /// circuit and placed on the stamp for data availability.
-    pub fn prove_output<RNG: RngCore + CryptoRng>(
+    pub fn prove_output<RNG: CryptoRng>(
         rng: &mut RNG,
         rcv: value::Trapdoor,
         alpha: ActionRandomizer<effect::Output>,
@@ -540,7 +540,7 @@ impl ProofStamp {
     ///
     /// The spend's `anchor` is taken as the stamp's anchor — chain
     /// validation lives inside the spendable lineage, not here.
-    pub fn prove_spend<RNG: RngCore + CryptoRng>(
+    pub fn prove_spend<RNG: CryptoRng>(
         rng: &mut RNG,
         bind_pcd: ragu::Pcd<spend::SpendHeader>,
         note: Note,
@@ -575,7 +575,7 @@ impl ProofStamp {
     /// caller and are never stored on the stamp; the merged (concatenated)
     /// digest list is returned so a fold can carry it forward without
     /// re-deriving.
-    pub fn prove_merge<RNG: RngCore + CryptoRng>(
+    pub fn prove_merge<RNG: CryptoRng>(
         rng: &mut RNG,
         (left_digests, left_tachygrams, left_anchor, left_proof): StampComponents,
         (right_digests, right_tachygrams, right_anchor, right_proof): StampComponents,
@@ -638,7 +638,7 @@ impl ProofStamp {
     }
 
     /// Advances the stamp's anchor with the provided anchor chain proof.
-    pub fn prove_lift<RNG: RngCore + CryptoRng>(
+    pub fn prove_lift<RNG: CryptoRng>(
         self,
         rng: &mut RNG,
         action_digests: impl IntoIterator<Item = ActionDigest>,
@@ -663,7 +663,7 @@ impl ProofStamp {
     }
 
     /// Advances the stamp's anchor with a proof of the provided sequence.
-    pub fn lift<RNG: RngCore + CryptoRng>(
+    pub fn lift<RNG: CryptoRng>(
         self,
         rng: &mut RNG,
         descriptors: &BTreeSet<action::Descriptor>,
@@ -711,7 +711,7 @@ impl ProofStamp {
     ///
     /// TODO: confirm desc list against stamp? it's forbidden by the proof
     /// system, but we might want to fail early.
-    pub fn merge<RNG: RngCore + CryptoRng>(
+    pub fn merge<RNG: CryptoRng>(
         rng: &mut RNG,
         (left_stamp, left_desc): (Self, BTreeSet<action::Descriptor>),
         (right_stamp, right_desc): (Self, BTreeSet<action::Descriptor>),
@@ -806,7 +806,7 @@ impl ProofStamp {
     /// # Soundness
     ///
     /// The parameter is a multiset: order does not matter, multiplicity does.
-    pub(crate) fn verify_proof<RNG: RngCore + CryptoRng>(
+    pub(crate) fn verify_proof<RNG: CryptoRng>(
         &self,
         rng: &mut RNG,
         action_digests: impl IntoIterator<Item = ActionDigest>,

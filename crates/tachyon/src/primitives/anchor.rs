@@ -27,7 +27,7 @@ pub enum AnchorError {
 }
 
 /// Running anchor over the consensus state.
-#[derive(Clone, Copy, Debug, From, Into, PartialEq, TotalEq)]
+#[derive(Clone, Copy, Debug, From, Into, Ord, PartialEq, PartialOrd, TotalEq)]
 pub struct Anchor(pub Fp);
 
 impl Anchor {

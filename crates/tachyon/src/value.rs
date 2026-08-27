@@ -7,7 +7,7 @@ use ff::Field as _;
 use group::Curve as _;
 use lazy_static::lazy_static;
 use pasta_curves::{Ep, EpAffine, Fq, arithmetic::CurveExt as _};
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 use crate::constants::MAX_MONEY;
 
@@ -54,7 +54,7 @@ impl Trapdoor {
     pub const ZERO: Self = Self(Fq::ZERO);
 
     /// Generate a random trapdoor.
-    pub fn random<RNG: RngCore + CryptoRng>(rng: &mut RNG) -> Self {
+    pub fn random<RNG: CryptoRng>(rng: &mut RNG) -> Self {
         Self(Fq::random(rng))
     }
 

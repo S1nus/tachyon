@@ -9,25 +9,19 @@
 )]
 
 extern crate alloc;
-extern crate std;
 
-use alloc::{collections::BTreeMap, rc::Rc, vec, vec::Vec};
-use core::{
-    cell::{Cell, RefCell},
-    iter,
-    ops::RangeInclusive,
-};
+use alloc::{collections::BTreeMap, vec, vec::Vec};
+use core::{cell::RefCell, iter, ops::RangeInclusive};
 
-use ff::{Field as _, PrimeField as _};
+use ff::PrimeField as _;
 use pasta_curves::Fp;
 use ragu::{Pcd, Proof};
 use rand::{SeedableRng as _, rngs::StdRng};
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 use crate::{
     action::{self, Action},
     bundle::{self, Bundle},
-    constants::EPOCH_SIZE,
     digest::blake2b,
     entropy::{ActionEntropy, ActionRandomizer},
     keys::{NoteMasterKey, PaymentKey, ProofAuthorizingKey, private},
@@ -100,7 +94,7 @@ pub fn mock_wtxid<S: StampState + 'static>(bundle: &Bundle<S>) -> PointerStamp {
     PointerStamp::try_from(wtxid).expect("nonzero wtxid")
 }
 
-pub fn random_action(rng: &mut (impl RngCore + CryptoRng)) -> Action {
+pub fn random_action<RNG: CryptoRng>(rng: &mut RNG) -> Action {
     let wallet = WalletSim::random(rng);
     let ask = wallet.sk.derive_auth_private();
     let note = wallet.random_note(400);
@@ -113,8 +107,8 @@ pub fn random_action(rng: &mut (impl RngCore + CryptoRng)) -> Action {
     unproven.actions[0]
 }
 
-pub fn spend_witness(
-    rng: &mut (impl RngCore + CryptoRng),
+pub fn spend_witness<RNG: CryptoRng>(
+    rng: &mut RNG,
     note: &Note,
 ) -> (
     value::Trapdoor,
@@ -127,8 +121,8 @@ pub fn spend_witness(
     (rcv, theta, alpha)
 }
 
-pub fn build_output_plan(
-    rng: &mut (impl RngCore + CryptoRng),
+pub fn build_output_plan<RNG: CryptoRng>(
+    rng: &mut RNG,
     note: Note,
 ) -> (
     value::Trapdoor,
@@ -142,8 +136,8 @@ pub fn build_output_plan(
     (rcv, alpha, plan)
 }
 
-pub fn build_output_stamp(
-    rng: &mut (impl RngCore + CryptoRng),
+pub fn build_output_stamp<RNG: CryptoRng>(
+    rng: &mut RNG,
     anchor: Anchor,
     note: Note,
 ) -> (ProofStamp, action::Plan<effect::Output>) {
@@ -166,8 +160,8 @@ pub fn build_output_stamp(
     (stamp, plan)
 }
 
-pub fn build_autonome(
-    rng: &mut (impl RngCore + CryptoRng),
+pub fn build_autonome<RNG: CryptoRng>(
+    rng: &mut RNG,
     wallet: &WalletSim,
     spend_value: u64,
     output_value: u64,
@@ -197,8 +191,8 @@ pub fn build_autonome(
 ///
 /// Normal tools in this crate don't allow you to carry out such operations, so
 /// this utility will fuse a `MergeStamp` without checking for intersection.
-pub fn forge_overlapping_merge(
-    rng: &mut (impl RngCore + CryptoRng),
+pub fn forge_overlapping_merge<RNG: CryptoRng>(
+    rng: &mut RNG,
     (stamp_a, descriptors_a): (&ProofStamp, &Vec<action::Descriptor>),
     (stamp_b, descriptors_b): (&ProofStamp, &Vec<action::Descriptor>),
 ) -> Pcd<StampHeader> {
@@ -261,8 +255,8 @@ pub fn forge_overlapping_merge(
     pcd
 }
 
-pub fn random_block(
-    rng: &mut (impl RngCore + CryptoRng),
+pub fn random_block<RNG: CryptoRng>(
+    rng: &mut RNG,
     stamp_size: usize,
     n_stamps: usize,
 ) -> Vec<Vec<Tachygram>> {
@@ -275,8 +269,8 @@ pub fn random_block(
     .collect()
 }
 
-pub fn random_block_with(
-    rng: &mut (impl RngCore + CryptoRng),
+pub fn random_block_with<RNG: CryptoRng>(
+    rng: &mut RNG,
     stamps_cms: &[Vec<note::Commitment>],
     n_stamps: usize,
 ) -> Vec<Vec<Tachygram>> {
@@ -296,122 +290,92 @@ pub fn random_block_with(
 }
 
 #[derive(Clone, Debug)]
-struct PoolSimBlock {
-    prev: Anchor,
-    stamps: Vec<Vec<Tachygram>>,
-}
-
-/// A block's memoized curve work: its per-stamp tachygram-set commitments and
-/// the post anchors those commitments fold to. Both require a polynomial commit
-/// (MSM) per stamp, so they are computed once per block and shared via [`Rc`].
-struct BlockDigest {
-    commits: Vec<TachygramSetCommit>,
-    anchors: Vec<Anchor>,
+pub struct PoolSimBlock {
+    pub prev: Anchor,
+    pub stamps: Vec<(Anchor, Vec<Tachygram>, TachygramSetCommit, Anchor)>,
 }
 
 impl PoolSimBlock {
-    /// Per-stamp tachygram-set commitments, in stamp order.
-    fn commits(&self) -> Vec<TachygramSetCommit> {
-        self.stamps
-            .iter()
-            .map(|tgs| tgs.iter().copied().collect::<TachygramSetPoly>().commit())
-            .collect()
+    /// Commit each stamp's tachygrams and fold the anchor onward from `prev`,
+    /// binding `epoch`, the epoch of the block at `height`. Each stamp costs
+    /// one MSM, paid here so reads are lookups.
+    pub fn new(prev: Anchor, height: BlockHeight, stamps: Vec<Vec<Tachygram>>) -> Self {
+        let epoch = height.epoch();
+        let mut anchor = prev;
+        let entries = stamps
+            .into_iter()
+            .map(|tgs| {
+                let stamp_prev = anchor;
+                let commit = tgs.iter().copied().collect::<TachygramSetPoly>().commit();
+                let stamp_after = anchor.next_stamp(epoch, &commit).unwrap();
+                anchor = stamp_after;
+                (stamp_prev, tgs, commit, stamp_after)
+            })
+            .collect();
+        Self {
+            prev,
+            stamps: entries,
+        }
     }
 
-    /// The block's commitments and post anchors in one pass: one anchor per
-    /// stamp, folding `next_stamp` from `prev`. Every link binds `epoch`, the
-    /// epoch of the block at `height`. A stampless block contributes no link,
-    /// so its anchor list is empty. The anchors reuse the commitments, so the
-    /// MSMs run once.
-    fn digest(&self, height: BlockHeight) -> BlockDigest {
-        let epoch = height.epoch();
-        let commits = self.commits();
-        let anchors = commits.iter().fold(Vec::new(), |mut acc, commit| {
-            let last = acc.last().unwrap_or(&self.prev);
-            acc.push(last.next_stamp(epoch, commit).unwrap());
-            acc
-        });
-        BlockDigest { commits, anchors }
+    /// The block's terminal anchor: its last stamp's, or its entry anchor
+    /// unchanged when the block published no stamp.
+    pub fn anchor(&self) -> Anchor {
+        match self.stamps.last() {
+            Some(&(_, _, _, anchor)) => anchor,
+            None => self.prev,
+        }
+    }
+
+    pub fn tachygrams(&self) -> Vec<Vec<Tachygram>> {
+        self.stamps.iter().map(|stamps| stamps.1.clone()).collect()
+    }
+
+    pub fn stamp_commits(&self) -> Vec<TachygramSetCommit> {
+        self.stamps.iter().map(|stamps| stamps.2).collect()
     }
 }
 
 pub struct PoolSim {
     history: Vec<PoolSimBlock>,
-    /// Per-block digest memo, keyed by block height. The history is
-    /// append-only, so a cached digest never goes stale.
-    digests: RefCell<BTreeMap<BlockHeight, Rc<BlockDigest>>>,
-    /// Post-anchor -> (height, stamp position) index, populated alongside the
-    /// digests, so anchor lookup is a map hit rather than a full-history scan.
-    /// Keyed by the anchor's inner `Fp` (an ordering of `Anchor` itself would
-    /// mean by field value, not chain relationship, so it is not exposed).
-    anchor_locs: RefCell<BTreeMap<Fp, (BlockHeight, usize)>>,
-    /// Block-digest cache tallies (misses = one-time MSM work, hits = saved),
-    /// summarized once when the pool is dropped rather than per height.
-    digest_misses: Cell<usize>,
-    digest_hits: Cell<usize>,
-}
-
-impl Drop for PoolSim {
-    fn drop(&mut self) {
-        let (misses, hits) = (self.digest_misses.get(), self.digest_hits.get());
-        if misses + hits > 0 {
-            std::eprintln!(
-                "[poolsim] block: {misses} digested, {hits} reused ({} blocks)",
-                self.history.len(),
-            );
-        }
-    }
+    anchor_index: BTreeMap<Anchor, (BlockHeight, usize)>,
 }
 
 impl PoolSim {
     #[must_use]
-    pub fn genesis(rng: &mut (impl RngCore + CryptoRng)) -> Self {
+    pub fn genesis<RNG: CryptoRng>(rng: &mut RNG) -> Self {
         Self::genesis_with(random_block(rng, 1, 50))
     }
 
     pub fn genesis_with(stamps: Vec<Vec<Tachygram>>) -> Self {
-        Self {
-            history: alloc::vec![PoolSimBlock {
-                prev: Anchor::default(),
-                stamps
-            }],
-            digests: RefCell::new(BTreeMap::new()),
-            anchor_locs: RefCell::new(BTreeMap::new()),
-            digest_misses: Cell::new(0),
-            digest_hits: Cell::new(0),
-        }
+        let mut pool = Self {
+            history: Vec::new(),
+            anchor_index: BTreeMap::new(),
+        };
+        pool.push_block(Anchor::default(), stamps);
+        pool
     }
 
-    /// The block mined at `height`.
-    fn block(&self, height: BlockHeight) -> &PoolSimBlock {
+    pub fn block(&self, height: BlockHeight) -> &PoolSimBlock {
         self.history
             .get(usize::try_from(height).expect("fits usize"))
             .expect("query height should exist")
     }
 
-    /// The block's memoized digest, computed (and its anchors indexed) once.
-    fn digest_at(&self, height: BlockHeight) -> Rc<BlockDigest> {
-        if let Some(digest) = self.digests.borrow().get(&height) {
-            self.digest_hits.set(self.digest_hits.get() + 1);
-            return Rc::clone(digest);
+    /// Append a block entered at `prev`, indexing the cursor each of its
+    /// anchors opens. An epoch-first block's entry anchor is the epoch lift's
+    /// product and so is indexed too; any other entry anchor is the previous
+    /// block's terminal, already indexed there.
+    fn push_block(&mut self, prev: Anchor, stamps: Vec<Vec<Tachygram>>) {
+        let height = BlockHeight::from(self.history.len());
+        let block = PoolSimBlock::new(prev, height, stamps);
+        if height.is_epoch_first() {
+            self.anchor_index.insert(prev, (height, 0));
         }
-        self.digest_misses.set(self.digest_misses.get() + 1);
-        let digest = Rc::new(self.block(height).digest(height));
-        let mut locs = self.anchor_locs.borrow_mut();
-        for (position, anchor) in digest.anchors.iter().enumerate() {
-            locs.insert(Fp::from(*anchor), (height, position));
+        for (position, &(_prev_anchor, _, _, anchor)) in block.stamps.iter().enumerate() {
+            self.anchor_index.insert(anchor, (height, position + 1));
         }
-        drop(locs);
-        self.digests.borrow_mut().insert(height, Rc::clone(&digest));
-        digest
-    }
-
-    /// Ensure every block's anchors are indexed, so [`anchor_locs`] is
-    /// authoritative for a lookup miss.
-    fn ensure_digests(&self) {
-        for idx in 0..self.history.len() {
-            drop(self.digest_at(BlockHeight::from(idx)));
-        }
+        self.history.push(block);
     }
 
     #[must_use]
@@ -421,140 +385,7 @@ impl PoolSim {
 
     #[must_use]
     pub fn anchor(&self) -> Anchor {
-        self.anchor_at(self.height())
-    }
-
-    #[must_use]
-    pub fn tachygrams_at(&self, height: BlockHeight) -> Vec<Vec<Tachygram>> {
-        self.block(height).stamps.clone()
-    }
-
-    #[must_use]
-    pub fn stamp_commits_at(&self, height: BlockHeight) -> Vec<TachygramSetCommit> {
-        self.digest_at(height).commits.clone()
-    }
-
-    #[must_use]
-    pub fn prev_anchor_at(&self, height: BlockHeight) -> Anchor {
-        self.block(height).prev
-    }
-
-    #[must_use]
-    pub fn anchor_at(&self, height: BlockHeight) -> Anchor {
-        // The block's terminal anchor is the last of its memoized post anchors,
-        // or its entry anchor unchanged when the block published no stamp.
-        self.digest_at(height)
-            .anchors
-            .last()
-            .copied()
-            .unwrap_or_else(|| self.prev_anchor_at(height))
-    }
-
-    /// The pool blocks spanning the anchor range `(start, end]`, in forward
-    /// order: each `Ok((height, stamps))` is a block's in-span tachygrams,
-    /// each `Err(epoch)` a `next_epoch` lift into `epoch`. `start`/`end` may
-    /// sit mid-block; the first and last blocks are trimmed to the span.
-    /// Stampless blocks advance no anchor and so contribute no entry, though
-    /// a boundary marker is still emitted for a stampless epoch-first block.
-    /// Anchors are not returned (the caller folds them).
-    #[must_use]
-    pub fn anchor_steps(
-        &self,
-        start: Anchor,
-        end: Anchor,
-    ) -> Vec<Result<(BlockHeight, Vec<Vec<Tachygram>>), EpochIndex>> {
-        // `start` enters the first stamp. A post anchor sits mid-block, so the
-        // span starts at the next stamp. An epoch-boundary lift (including the
-        // genesis entry) is produced by no stamp: the span then starts at the
-        // entered block's stamp 0, with the lift contributing a leading marker.
-        let mut steps: Vec<Result<(BlockHeight, Vec<Vec<Tachygram>>), EpochIndex>> = Vec::new();
-        let stamp_len = |height: BlockHeight| -> usize { self.block(height).stamps.len() };
-        let (start_height, from) = match self.locate_anchor(start) {
-            Ok((height, position)) => (height, (position + 1).min(stamp_len(height))),
-            Err((_pre_boundary, epoch)) => {
-                steps.push(Err(epoch));
-                (epoch_first_of(epoch), 0)
-            },
-        };
-
-        // One past the last included stamp of the end block (whose post is
-        // `end`). A boundary end covers nothing in the epoch it enters, so the
-        // walk stops at that epoch's first block having taken no stamp from it.
-        let (end_height, to) = match self.locate_anchor(end) {
-            Ok((height, position)) => (height, (position + 1).min(stamp_len(height))),
-            Err((_pre_boundary, epoch)) => (epoch_first_of(epoch), 0),
-        };
-
-        // Forward walk. The first block is trimmed at its head (`from`), the last
-        // at its tail (`to`). A boundary marker precedes every epoch-first block
-        // after the start block, whether or not that block publishes a stamp.
-        for height_idx in start_height.0..=end_height.0 {
-            let height = BlockHeight(height_idx);
-            let block = self.block(height);
-            if height_idx != start_height.0 && height.is_epoch_first() {
-                steps.push(Err(height.epoch()));
-            }
-            let lo = if height_idx == start_height.0 {
-                from
-            } else {
-                0
-            };
-            let hi = if height_idx == end_height.0 {
-                to
-            } else {
-                block.stamps.len()
-            };
-            let stamps = block.stamps[lo..hi].to_vec();
-            // A block with no in-span stamp advances no anchor, so it is not a
-            // step: this covers both a stampless block and a first block the
-            // `start` terminal empties.
-            if stamps.is_empty() {
-                continue;
-            }
-            steps.push(Ok((height, stamps)));
-        }
-
-        steps
-    }
-
-    /// The block that produced `anchor` (matched by its post anchors). An
-    /// epoch-boundary anchor `B_E = old_tip.next_epoch(E)` is no block's post
-    /// anchor (it is `E`'s first block's entry), so it instead returns
-    /// `Err((pre_boundary_anchor, E))` with the lifted previous-epoch terminal;
-    /// `Anchor::default()` is the epoch-0 boundary, resolved up front.
-    /// Returns `(height, position)` where `position` is the anchor's index
-    /// among its block's post anchors.
-    fn locate_anchor(&self, anchor: Anchor) -> Result<(BlockHeight, usize), (Anchor, EpochIndex)> {
-        if anchor == Anchor::default() {
-            return Err((self.pre_epoch_anchor(EpochIndex(0)), EpochIndex(0)));
-        }
-        self.ensure_digests();
-        if let Some(&location) = self.anchor_locs.borrow().get(&Fp::from(anchor)) {
-            return Ok(location);
-        }
-        // Not a post anchor: an epoch boundary `B_E = old_tip.next_epoch(E)`, no
-        // block's post anchor but the epoch-first block's `prev` (a distinct
-        // domain from post anchors, so no post/boundary overlap is possible).
-        for (height_idx, block) in self.history.iter().enumerate() {
-            let height = BlockHeight::from(height_idx);
-            if height.is_epoch_first() && block.prev == anchor {
-                let epoch = height.epoch();
-                return Err((self.pre_epoch_anchor(epoch), epoch));
-            }
-        }
-        unreachable!("anchor not found: {anchor:?}");
-    }
-
-    /// The prior-epoch terminal anchor that folds into `epoch`'s boundary
-    /// `B_epoch = pre_epoch_anchor(epoch).next_epoch(epoch)`. This is the
-    /// single owner of the genesis convention: `Fp::ZERO` for the genesis
-    /// epoch (matching [`Anchor::default`]'s `ZERO.next_epoch(0)`),
-    /// otherwise the terminal anchor of the previous epoch's final block.
-    #[must_use]
-    pub fn pre_epoch_anchor(&self, epoch: EpochIndex) -> Anchor {
-        epoch_first_of(epoch)
-            .prev()
-            .map_or_else(|| Anchor::from(Fp::ZERO), |height| self.anchor_at(height))
+        self.block(self.height()).anchor()
     }
 
     pub fn advance(
@@ -588,7 +419,7 @@ impl PoolSim {
         } else {
             old_tip
         };
-        self.history.push(PoolSimBlock { prev, stamps });
+        self.push_block(prev, stamps);
     }
 }
 
@@ -598,8 +429,8 @@ impl PoolSim {
 /// One [`AnchorSeed`] per absorbed stamp, fused linearly via [`AnchorFuse`].
 /// A stampless block advances no anchor and so contributes no segment; the
 /// range must therefore cover at least one stamp.
-pub(crate) fn build_anchor_chain_pcd(
-    rng: &mut (impl RngCore + CryptoRng),
+pub(crate) fn build_anchor_chain_pcd<RNG: CryptoRng>(
+    rng: &mut RNG,
     pool: &PoolSim,
     range: RangeInclusive<BlockHeight>,
 ) -> Pcd<pool::AnchorChain> {
@@ -608,11 +439,11 @@ pub(crate) fn build_anchor_chain_pcd(
     assert_eq!(start.epoch(), end.epoch(), "AnchorChain single-epoch range");
     assert!(start <= end);
 
-    let mut state = pool.prev_anchor_at(start);
+    let mut state = pool.block(start).prev;
     let mut chain: Option<Pcd<pool::AnchorChain>> = None;
     let mut height = start;
     loop {
-        for tgs in &pool.tachygrams_at(height) {
+        for tgs in &pool.block(height).tachygrams() {
             let witness = witness::anchor_seed(((), ()), state, height.epoch(), tgs);
             let next_state = state.next_stamp(witness.1, &witness.2).unwrap();
             let (seed, ()) = PROOF_SYSTEM
@@ -632,14 +463,14 @@ pub(crate) fn build_anchor_chain_pcd(
         if height >= end {
             break;
         }
-        height = height.next().expect("height < max");
+        height = height.next();
     }
 
     chain.expect("AnchorChain range must cover at least one stamp")
 }
 
-pub(crate) fn build_unspent_seed_pcd(
-    rng: &mut (impl RngCore + CryptoRng),
+pub(crate) fn build_unspent_seed_pcd<RNG: CryptoRng>(
+    rng: &mut RNG,
     start: Anchor,
     epoch: EpochIndex,
     tgs: &[Tachygram],
@@ -659,8 +490,8 @@ pub(crate) fn build_unspent_seed_pcd(
 /// block-entry anchor of `range.start()` to the block anchor of `range.end()`.
 /// `nf` holds one nullifier per epoch the range spans (`nf[0]` for
 /// `range.start().epoch()`).
-pub(crate) fn build_unspent_pcd_between_blocks(
-    rng: &mut (impl RngCore + CryptoRng),
+pub(crate) fn build_unspent_pcd_between_blocks<RNG: CryptoRng>(
+    rng: &mut RNG,
     pool: &PoolSim,
     nf: &[Nullifier],
     range: RangeInclusive<BlockHeight>,
@@ -670,93 +501,101 @@ pub(crate) fn build_unspent_pcd_between_blocks(
         pool,
         nf,
         (
-            pool.prev_anchor_at(*range.start()),
-            pool.anchor_at(*range.end()),
+            pool.block(*range.start()).prev,
+            pool.block(*range.end()).anchor(),
         ),
     )
+}
+
+/// The nullifier a span's `nf` holds for `epoch`, indexed from `base`, the
+/// epoch the span starts in.
+fn nf_at(nf: &[Nullifier], base: EpochIndex, epoch: EpochIndex) -> Nullifier {
+    nf[usize::try_from(u64::from(epoch - base)).expect("epoch within span")]
 }
 
 /// Build an [`ArbitraryUnspent`] for the anchor span `(start_anchor,
 /// end_anchor)`, covering every stamp that advances the anchor between them;
 /// either endpoint may sit mid-block. `nf` holds one nullifier per epoch
-/// spanned, `nf[0]` for the span's starting epoch. Seeds one leaf per anchor
-/// step and fuses them as a binary tree via [`fuse_unspent_tree`].
+/// spanned, `nf[0]` for the span's starting epoch. Seeds one leaf per stamp
+/// and fuses them as a binary tree via [`fuse_unspent_tree`].
 ///
 /// Every epoch boundary the span crosses gets an
 /// [`EndEpochUnspentSeed`](pool::EndEpochUnspentSeed) leaf spanning the
 /// boundary tick, seeded from the leaving epoch's terminal anchor.
-pub(crate) fn build_unspent_pcd_between_anchors(
-    rng: &mut (impl RngCore + CryptoRng),
+pub(crate) fn build_unspent_pcd_between_anchors<RNG: CryptoRng>(
+    rng: &mut RNG,
     pool: &PoolSim,
     nf: &[Nullifier],
     (start_anchor, end_anchor): (Anchor, Anchor),
 ) -> Pcd<pool::ArbitraryUnspent> {
-    // One leaf per stamp, each advancing its block's running anchor, plus one
-    // per boundary the span crosses. Anchors are folded here: the first block
-    // runs from `start_anchor` (possibly mid-block), every other from its
-    // recorded entry anchor.
-    let steps = pool.anchor_steps(start_anchor, end_anchor);
-    let leading = steps.first().expect("anchor span covers at least one step");
-    // `nf` is indexed from the epoch `start_anchor` sits in, which a boundary
-    // anchor names directly and any other names through its block. A boundary
-    // start's own crossing precedes the span, so its leading marker seeds
-    // nothing; a marker after a block-terminal start is a genuine crossing.
-    let (base, skip) = match pool.locate_anchor(start_anchor) {
-        Ok((height, _)) => (height.epoch(), 0),
-        Err((_, epoch)) => (epoch, 1),
-    };
-    let nf_at = |epoch: EpochIndex| -> Nullifier {
-        nf[usize::try_from(u64::from(epoch - base)).expect("epoch within span")]
-    };
+    // The cursor an endpoint opens: its block, and that block's first stamp
+    // the endpoint does not already cover. Either endpoint may be a boundary
+    // anchor, which no stamp produced and which opens its epoch's first block.
+    let (start_height, start_inner) = pool.anchor_index[&start_anchor];
+    let (end_height, end_inner) = pool.anchor_index[&end_anchor];
 
-    let mut leaves: Vec<Pcd<pool::ArbitraryUnspent>> = Vec::with_capacity(steps.len());
-    for step in steps.iter().skip(skip) {
-        match step.as_ref() {
-            Ok(block) => {
-                let (height, block_stamps) = (block.0, &block.1);
-                let epoch = height.epoch();
-                let leaf_nf = nf_at(epoch);
-                let mut entry = if leaves.is_empty() && leading.is_ok() {
-                    start_anchor
-                } else {
-                    pool.prev_anchor_at(height)
-                };
-                for tgs in block_stamps {
-                    let commit = tgs.iter().copied().collect::<TachygramSetPoly>().commit();
-                    let (seed, ()) = PROOF_SYSTEM
-                        .seed(
-                            rng,
-                            pool::UnspentSeed,
-                            witness::unspent_seed(((), ()), entry, epoch, tgs, leaf_nf),
-                        )
-                        .expect("UnspentSeed");
-                    leaves.push(seed);
-                    entry = entry.next_stamp(epoch, &commit).unwrap();
-                }
-            },
-            // The marker denotes the crossing *into* `epoch`, so the segment
-            // leaves `epoch - 1` from that epoch's terminal anchor, which is
-            // what `pre_epoch_anchor` names.
-            Err(&epoch) => {
-                let prev_epoch = EpochIndex(epoch.0 - 1);
-                let (seed, ()) = PROOF_SYSTEM
-                    .seed(
-                        rng,
-                        pool::EndEpochUnspentSeed,
-                        witness::end_epoch_unspent_seed(
-                            ((), ()),
-                            pool.pre_epoch_anchor(epoch),
-                            prev_epoch,
-                            nf_at(prev_epoch),
-                            nf_at(epoch),
-                        ),
-                    )
-                    .expect("EndEpochUnspentSeed");
-                leaves.push(seed);
-            },
-        }
-    }
-    fuse_unspent_tree(rng, nf, base, leaves)
+    // The span is that half-open interval of stamp slots, ordered by block and
+    // then by position within the block.
+    let span = (start_height, start_inner)..(end_height, end_inner);
+
+    // `nf` is indexed from the epoch `start_anchor` sits in.
+    let base_epoch = start_height.epoch();
+
+    // A span between two anchors is an interval of stamps. Cut that interval by
+    // epoch. Each epoch after the first segment begins with a crossing out of
+    // the one before it.
+    let leaves: Vec<Pcd<pool::ArbitraryUnspent>> = (base_epoch.0..=end_height.epoch().0)
+        .map(EpochIndex)
+        .map(|epoch| {
+            let crossing = (epoch != base_epoch).then(|| {
+                let leaving = EpochIndex(epoch.0 - 1);
+                (leaving, pool.block(leaving.last_block()).anchor())
+            });
+            let stamps: Vec<_> = (start_height.0.max(epoch.first_block().0)
+                ..=end_height.0.min(epoch.last_block().0))
+                .map(BlockHeight)
+                .flat_map(|height| {
+                    pool.block(height)
+                        .stamps
+                        .iter()
+                        .enumerate()
+                        .map(move |(position, stamp)| ((height, position), stamp))
+                })
+                .filter(|&(slot, _)| span.contains(&slot))
+                .map(|(_, stamp)| (stamp.0, stamp.1.as_slice()))
+                .collect();
+            (epoch, crossing, stamps)
+        })
+        .flat_map(|(epoch, crossing, stamps)| {
+            let epoch_nf = nf_at(nf, base_epoch, epoch);
+            let crossing_leaf = crossing.map(|(leaving, terminal)| {
+                let witness = witness::end_epoch_unspent_seed(
+                    ((), ()),
+                    terminal,
+                    leaving,
+                    nf_at(nf, base_epoch, leaving),
+                    epoch_nf,
+                );
+                PROOF_SYSTEM
+                    .seed(rng, pool::EndEpochUnspentSeed, witness)
+                    .expect("EndEpochUnspentSeed")
+                    .0
+            });
+            let seeded: Vec<_> = stamps
+                .into_iter()
+                .map(|(entry, tgs)| {
+                    let witness = witness::unspent_seed(((), ()), entry, epoch, tgs, epoch_nf);
+                    PROOF_SYSTEM
+                        .seed(rng, pool::UnspentSeed, witness)
+                        .expect("UnspentSeed")
+                        .0
+                })
+                .collect();
+            crossing_leaf.into_iter().chain(seeded)
+        })
+        .collect();
+
+    fuse_unspent_tree(rng, nf, base_epoch, leaves)
 }
 
 /// Fuse contiguous [`ArbitraryUnspent`] chains as a binary tree: split at the
@@ -765,8 +604,8 @@ pub(crate) fn build_unspent_pcd_between_anchors(
 /// chain link. Everything a seam needs is read off the halves' headers; a
 /// chain's elapsed slice is `nf[epoch_start - base..epoch_end - base]` (one
 /// nullifier per crossed boundary).
-fn fuse_unspent_tree(
-    rng: &mut (impl RngCore + CryptoRng),
+fn fuse_unspent_tree<RNG: CryptoRng>(
+    rng: &mut RNG,
     nf: &[Nullifier],
     base: EpochIndex,
     mut chains: Vec<Pcd<pool::ArbitraryUnspent>>,
@@ -849,7 +688,7 @@ impl WalletSim {
         }
     }
 
-    pub fn random(rng: &mut (impl RngCore + CryptoRng)) -> Self {
+    pub fn random<RNG: CryptoRng>(rng: &mut RNG) -> Self {
         Self::new(private::SpendingKey::random(rng))
     }
 
@@ -882,9 +721,9 @@ impl WalletSim {
         self.mk(note).derive_nullifier(epoch)
     }
 
-    pub fn note_master(
+    pub fn note_master<RNG: CryptoRng>(
         &self,
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut RNG,
         note: Note,
     ) -> Pcd<delegation::NfPrefixHeader> {
         let (pcd, ()) = PROOF_SYSTEM
@@ -893,9 +732,9 @@ impl WalletSim {
         pcd
     }
 
-    pub fn nullifier_pcd(
+    pub fn nullifier_pcd<RNG: CryptoRng>(
         &self,
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut RNG,
         note: Note,
         target_epoch: EpochIndex,
     ) -> Pcd<delegation::NullifierHeader> {
@@ -903,9 +742,9 @@ impl WalletSim {
         ggm_tools::nullifier_from_master(rng, master, target_epoch)
     }
 
-    pub fn derived_range(
+    pub fn derived_range<RNG: CryptoRng>(
         &self,
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut RNG,
         note: &Note,
         epoch_start: EpochIndex,
         len: u32,
@@ -914,9 +753,9 @@ impl WalletSim {
         ggm_tools::nullifier_range_from_master(rng, &master, epoch_start, len)
     }
 
-    pub fn spendable_init(
+    pub fn spendable_init<RNG: CryptoRng>(
         &self,
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut RNG,
         note: &Note,
         pool: &PoolSim,
         init_height: BlockHeight,
@@ -925,8 +764,8 @@ impl WalletSim {
         let epoch = init_height.epoch();
         let present_nf = self.nf_at(note, epoch);
         let (pre_cm_anchor, creation_tgs) = {
-            let stamps = pool.tachygrams_at(init_height);
-            let stamp_commits = pool.stamp_commits_at(init_height);
+            let stamps = pool.block(init_height).tachygrams();
+            let stamp_commits = pool.block(init_height).stamp_commits();
             let cm_idx = stamps
                 .iter()
                 .position(|tgs| tgs.contains(&cm.into()))
@@ -935,7 +774,7 @@ impl WalletSim {
             // Anchor immediately before the cm-stamp (the cm-block prefix fold).
             let pre_cm_anchor = stamp_commits[..cm_idx]
                 .iter()
-                .fold(pool.prev_anchor_at(init_height), |anchor, commit| {
+                .fold(pool.block(init_height).prev, |anchor, commit| {
                     anchor.next_stamp(init_height.epoch(), commit).unwrap()
                 });
 
@@ -960,9 +799,9 @@ impl WalletSim {
         spendable
     }
 
-    pub fn fresh_spend(
+    pub fn fresh_spend<RNG: CryptoRng>(
         &self,
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut RNG,
         pool: &PoolSim,
         height: BlockHeight,
         spend_note: &Note,
@@ -970,14 +809,15 @@ impl WalletSim {
         self.spendable_init(rng, spend_note, pool, height)
     }
 
-    pub fn unspent_bind(
+    /// Attribute `arbitrary`'s tested values to `note`, over a window derived
+    /// to cover the span the segment announces on its own header.
+    pub fn unspent_bind<RNG: CryptoRng>(
         &self,
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut RNG,
         arbitrary: Pcd<pool::ArbitraryUnspent>,
         note: &Note,
-        epoch_start: EpochIndex,
-        present_epoch: EpochIndex,
     ) -> Pcd<pool::Unspent> {
+        let (_, (epoch_start, _), _, (present_epoch, _), _) = *arbitrary.data();
         let len = present_epoch.0 - epoch_start.0 + 1;
         let range = self.derived_range(rng, note, epoch_start, len);
         let elapsed: Vec<Nullifier> = (epoch_start.0..present_epoch.0)
@@ -995,55 +835,49 @@ impl WalletSim {
         unspent
     }
 
-    pub fn lift(
+    pub fn lift<RNG: CryptoRng>(
         &self,
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut RNG,
         spendable: Pcd<spendable::SpendableHeader>,
         arbitrary: Pcd<pool::ArbitraryUnspent>,
         note: &Note,
-        epoch_start: EpochIndex,
-        present_epoch: EpochIndex,
     ) -> Pcd<spendable::SpendableHeader> {
-        let unspent = self.unspent_bind(rng, arbitrary, note, epoch_start, present_epoch);
+        let unspent = self.unspent_bind(rng, arbitrary, note);
         let (lifted, ()) = PROOF_SYSTEM
             .fuse(rng, spendable::SpendableLift, (), spendable, unspent)
             .expect("SpendableLift");
         lifted
     }
 
-    pub fn lift_over_creation_epoch(
+    /// Advance `spendable` from wherever it rests to `target`, over a segment
+    /// this builds: from its current anchor to `target`'s first block, so the
+    /// span carries every crossing on the way plus a tested nullifier in
+    /// `target`. The starting epoch comes off the header, so the caller needs
+    /// no height.
+    pub fn lift_to_epoch<RNG: CryptoRng>(
         &self,
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut RNG,
         pool: &PoolSim,
         note: &Note,
-        cm_height: BlockHeight,
         spendable: Pcd<spendable::SpendableHeader>,
+        target: EpochIndex,
     ) -> Pcd<spendable::SpendableHeader> {
-        let start_anchor = spendable.data().2;
-        let creation_epoch = cm_height.epoch();
-        let end_height = BlockHeight(epoch_final_of(creation_epoch).0 + 1);
+        let (_, (epoch, _), start_anchor) = *spendable.data();
+        let elapsed: Vec<Nullifier> = (epoch.0..=target.0)
+            .map(|index| self.nf_at(note, EpochIndex(index)))
+            .collect();
         let unspent = build_unspent_pcd_between_anchors(
             rng,
             pool,
-            &[
-                self.nf_at(note, creation_epoch),
-                self.nf_at(note, creation_epoch.next()),
-            ],
-            (start_anchor, pool.anchor_at(end_height)),
+            &elapsed,
+            (start_anchor, pool.block(target.first_block()).anchor()),
         );
-        self.lift(
-            rng,
-            spendable,
-            unspent,
-            note,
-            creation_epoch,
-            creation_epoch.next(),
-        )
+        self.lift(rng, spendable, unspent, note)
     }
 
-    pub fn autonome(
+    pub fn autonome<RNG: CryptoRng>(
         &self,
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut RNG,
         anchor: Anchor,
         spends: Vec<(Note, Pcd<spendable::SpendableHeader>, EpochIndex)>,
         output_notes: Vec<Note>,
@@ -1136,9 +970,9 @@ impl SyncSim {
         self.entry(handle).consumed
     }
 
-    pub fn build_next_unspent(
+    pub fn build_next_unspent<RNG: CryptoRng>(
         &mut self,
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut RNG,
         handle: usize,
         pool: &PoolSim,
         target_height: BlockHeight,
@@ -1158,12 +992,12 @@ impl SyncSim {
             rng,
             pool,
             &entry.nfs[nfs_from..],
-            (entry.cursor_anchor, pool.anchor_at(target_height)),
+            (entry.cursor_anchor, pool.block(target_height).anchor()),
         );
         let new_consumed = entry.consumed + (target_height.epoch().0 - entry.next_height.epoch().0);
         self.entries[idx].consumed = new_consumed;
         self.entries[idx].next_height = BlockHeight(target_height.0 + 1);
-        self.entries[idx].cursor_anchor = pool.anchor_at(target_height);
+        self.entries[idx].cursor_anchor = pool.block(target_height).anchor();
         unspent
     }
 
@@ -1181,21 +1015,12 @@ impl Default for SyncSim {
     }
 }
 
-fn epoch_first_of(epoch: EpochIndex) -> BlockHeight {
-    BlockHeight(epoch.0 * EPOCH_SIZE)
-}
-
-fn epoch_final_of(epoch: EpochIndex) -> BlockHeight {
-    let next_first = (epoch.0 + 1) * EPOCH_SIZE;
-    BlockHeight(next_first - 1)
-}
-
 pub mod ggm_tools {
     extern crate alloc;
     use alloc::vec::Vec;
 
     use ragu::{Pcd, Proof};
-    use rand_core::{CryptoRng, RngCore};
+    use rand_core::CryptoRng;
 
     use crate::{
         EpochIndex,
@@ -1206,8 +1031,8 @@ pub mod ggm_tools {
         witness,
     };
 
-    pub fn walk_master_to_depth(
-        rng: &mut (impl RngCore + CryptoRng),
+    pub fn walk_master_to_depth<RNG: CryptoRng>(
+        rng: &mut RNG,
         master_pcd: Pcd<delegation::NfPrefixHeader>,
         epoch: EpochIndex,
         target_depth: u8,
@@ -1236,8 +1061,8 @@ pub mod ggm_tools {
         pcd
     }
 
-    pub fn nullifier_from_master(
-        rng: &mut (impl RngCore + CryptoRng),
+    pub fn nullifier_from_master<RNG: CryptoRng>(
+        rng: &mut RNG,
         master_pcd: Pcd<delegation::NfPrefixHeader>,
         target_epoch: EpochIndex,
     ) -> Pcd<delegation::NullifierHeader> {
@@ -1254,8 +1079,8 @@ pub mod ggm_tools {
         pcd
     }
 
-    pub fn nullifier_range_from_master(
-        rng: &mut (impl RngCore + CryptoRng),
+    pub fn nullifier_range_from_master<RNG: CryptoRng>(
+        rng: &mut RNG,
         master_pcd: &Pcd<delegation::NfPrefixHeader>,
         epoch_start: EpochIndex,
         len: u32,

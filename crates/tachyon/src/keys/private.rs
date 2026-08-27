@@ -5,7 +5,7 @@ use core::marker::PhantomData;
 use derive_more::{Debug, From};
 use ff::{Field as _, FromUniformBytes as _, PrimeField as _};
 use pasta_curves::{Fp, Fq};
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 use super::{
     note::{NullifierKey, PaymentKey},
@@ -40,7 +40,7 @@ pub struct SpendingKey(#[debug(skip)] [u8; 32]);
 
 impl SpendingKey {
     /// Create a new spending key from 32 bytes of random data.
-    pub fn random<RNG: RngCore + CryptoRng>(rng: &mut RNG) -> Self {
+    pub fn random<RNG: CryptoRng>(rng: &mut RNG) -> Self {
         let mut rand_bytes = [0u8; 32];
         rng.fill_bytes(&mut rand_bytes);
         Self(rand_bytes)
@@ -196,11 +196,7 @@ pub struct ActionSigningKey<E: Effect>(
 
 impl<E: Effect> ActionSigningKey<E> {
     /// Sign a transaction sighash with this action key.
-    pub fn sign<RNG: RngCore + CryptoRng>(
-        &self,
-        rng: &mut RNG,
-        sighash: &[u8; 32],
-    ) -> action::Signature {
+    pub fn sign<RNG: CryptoRng>(&self, rng: &mut RNG, sighash: &[u8; 32]) -> action::Signature {
         action::Signature(self.0.sign(rng, sighash))
     }
 
@@ -236,11 +232,7 @@ pub struct BindingSigningKey(#[debug(skip)] reddsa::SigningKey<reddsa::BindingAu
 
 impl BindingSigningKey {
     /// Sign a transaction sighash with this binding key.
-    pub fn sign<RNG: RngCore + CryptoRng>(
-        &self,
-        rng: &mut RNG,
-        sighash: &[u8; 32],
-    ) -> bundle::Signature {
+    pub fn sign<RNG: CryptoRng>(&self, rng: &mut RNG, sighash: &[u8; 32]) -> bundle::Signature {
         bundle::Signature(self.0.sign(rng, sighash))
     }
 

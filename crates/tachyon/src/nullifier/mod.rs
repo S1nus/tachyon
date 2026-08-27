@@ -3,7 +3,7 @@
 use derive_more::{Debug, Eq as TotalEq, From, Into, PartialEq};
 use ff::Field as _;
 use pasta_curves::Fp;
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 use crate::primitives::Tachygram;
 
@@ -31,7 +31,7 @@ pub struct Trapdoor(#[debug(skip)] Fp);
 
 impl Trapdoor {
     /// Generate a fresh random trapdoor.
-    pub fn random<RNG: RngCore + CryptoRng>(rng: &mut RNG) -> Self {
+    pub fn random<RNG: CryptoRng>(rng: &mut RNG) -> Self {
         Self(Fp::random(rng))
     }
 }

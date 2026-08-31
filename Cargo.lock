@@ -373,9 +373,6 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
-dependencies = [
- "spin",
-]
 
 [[package]]
 name = "libc"
@@ -440,6 +437,12 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "once_cell"
+version = "1.21.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "postcard"
@@ -827,9 +830,9 @@ dependencies = [
 
 [[package]]
 name = "zakura-bls12-381"
-version = "1.0.0-rc.3"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a56ae6036dbd383c68dd407a69f7325c29f429d30539092fe8f0dced4cb05b9b"
+checksum = "2d9c833a85b5ba3303a5f14ed760d613bee8a9769923da5a1e7f51851849e7f5"
 dependencies = [
  "ff",
  "rand_core 0.10.1",
@@ -838,9 +841,9 @@ dependencies = [
 
 [[package]]
 name = "zakura-jubjub"
-version = "1.0.0-rc.3"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b5bbe1f733ae656ba1a03f5d2701419f2543f85586d8db1f20ac2553ac566c4"
+checksum = "4b10077e35b311a780366567771c4730245a4df7bd23b1f3414444b0e5c3a9cd"
 dependencies = [
  "bitvec",
  "ff",
@@ -852,14 +855,14 @@ dependencies = [
 
 [[package]]
 name = "zakura-pasta-curves"
-version = "1.0.0-rc.3"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7ae7848bc9fafb0ec81847251ce3d36a25d605377222c453de753323484ab9a"
+checksum = "6c906d3541e9e6b71aaa77af25c229a0c1ed38df58930fa75f2fd569632989dd"
 dependencies = [
  "blake2b_simd",
  "ff",
  "group",
- "lazy_static",
+ "once_cell",
  "rand",
  "static_assertions",
  "subtle",
@@ -867,12 +870,11 @@ dependencies = [
 
 [[package]]
 name = "zakura-reddsa"
-version = "1.0.0-rc.3"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8351c15be16d8716d0ccc56f3e8a54c2585ecd03b7bfdf87d932a424606e8a2"
+checksum = "8ecd8e46ef79bd3675733cee6741c432ccd259b9e060e4838d2cc311a654744f"
 dependencies = [
  "blake2b_simd",
- "byteorder",
  "frost-rerandomized",
  "group",
  "hex",
